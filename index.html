@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProRes 硬解 · FFmpeg n9.0.2</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect fill='%2312100c' width='32' height='32'/%3E%3Crect x='7' y='6' width='18' height='20' fill='none' stroke='%23f0a202' stroke-width='1.5'/%3E%3Cpath d='M7 12h18M7 20h18' stroke='%23f4ecdf' stroke-width='1'/%3E%3C/svg%3E">
+<script>
+  (function () {
+    var k = 'theme-prores-hwdec-20261022', t = null;
+    try { t = localStorage.getItem(k); } catch (e) {}
+    if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t;
+  })();
+</script>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f6f1e6;
+    --ink: #1a140e;
+    --muted: #5a4e42;
+    --accent: #8a4e00;
+    --gate: #efe6d4;
+    --veil: rgba(26, 20, 14, 0.5);
+    --checker: #d4cbb8;
+    --hair: rgba(26, 20, 14, 0.22);
+    --focus: #8a4e00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #12100c;
+      --ink: #f4ecdf;
+      --muted: #c9bba6;
+      --accent: #f0a202;
+      --gate: #1c1914;
+      --veil: rgba(244, 236, 223, 0.55);
+      --checker: #2a241c;
+      --hair: rgba(244, 236, 223, 0.2);
+      --focus: #f0a202;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg: #12100c;
+    --ink: #f4ecdf;
+    --muted: #c9bba6;
+    --accent: #f0a202;
+    --gate: #1c1914;
+    --veil: rgba(244, 236, 223, 0.55);
+    --checker: #2a241c;
+    --hair: rgba(244, 236, 223, 0.2);
+    --focus: #f0a202;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+    --bg: #f6f1e6;
+    --ink: #1a140e;
+    --muted: #5a4e42;
+    --accent: #8a4e00;
+    --gate: #efe6d4;
+    --veil: rgba(26, 20, 14, 0.5);
+    --checker: #d4cbb8;
+    --hair: rgba(26, 20, 14, 0.22);
+    --focus: #8a4e00;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: auto; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 1.0625rem;
+    line-height: 1.55;
+    overflow-wrap: break-word;
+  }
+  .theme-toggle {
+    position: fixed;
+    top: 0.85rem;
+    right: 0.85rem;
+    z-index: 3;
+    border: 1px solid var(--hair);
+    background: var(--bg);
+    color: var(--ink);
+    font: inherit;
+    font-size: 0.95rem;
+    padding: 0.4rem 0.75rem;
+    cursor: pointer;
+  }
+  .theme-toggle:focus-visible,
+  .frame:focus-visible,
+  a:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 3px;
+  }
+  a { color: inherit; }
+  a:hover { color: var(--accent); }
+
+  .sheet {
+    width: min(1120px, calc(100% - 8.25rem));
+    margin-left: auto;
+    margin-right: 6.25rem;
+    padding: 3.2rem 0 6rem 1.25rem;
+  }
+  header { max-width: 42rem; }
+  h1 { max-width: 4.8em; }
+  .edition {
+    margin: 0 0 1.25rem;
+    font-family: "Palatino Linotype", Palatino, "Songti SC", PMingLiU, SimSun, serif;
+    font-size: 1.15rem;
+  }
+  h1 {
+    margin: 0;
+    font-family: "Palatino Linotype", Palatino, "Songti SC", PMingLiU, SimSun, serif;
+    font-weight: 500;
+    font-size: clamp(2.7rem, 7vw, 5.4rem);
+    line-height: 0.98;
+    letter-spacing: -0.02em;
+  }
+  h1 span {
+    display: block;
+    margin-top: 0.35rem;
+    font-style: italic;
+    font-weight: 500;
+  }
+  .lede {
+    margin: 1.6rem 0 0;
+    max-width: 38rem;
+    font-size: 1.2rem;
+    line-height: 1.5;
+  }
+  .limit {
+    margin: 1rem 0 0;
+    max-width: 38rem;
+    color: var(--muted);
+  }
+
+  .section {
+    display: grid;
+    grid-template-columns: 4.75rem 1fr;
+    gap: 0.5rem 1.25rem;
+    margin-top: 5.75rem;
+  }
+  .idx {
+    margin: 0;
+    font-family: "Palatino Linotype", Palatino, "Songti SC", PMingLiU, SimSun, serif;
+    font-size: clamp(2rem, 4vw, 2.75rem);
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+  }
+  h2 {
+    margin: 0.15rem 0 0;
+    font-family: "Palatino Linotype", Palatino, "Songti SC", PMingLiU, SimSun, serif;
+    font-weight: 500;
+    font-size: clamp(1.8rem, 3vw, 2.4rem);
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+  }
+  .prose { max-width: 40rem; }
+  .prose p, .note p { margin: 0.8rem 0 0; }
+  .body { grid-column: 2; }
+  .cmd {
+    margin: 1.1rem 0 0;
+    font-family: "Palatino Linotype", Palatino, "Songti SC", PMingLiU, SimSun, serif;
+    font-size: 1.05rem;
+    line-height: 1.45;
+  }
+
+  .flow {
+    display: grid;
+    grid-template-columns: minmax(9rem, 0.8fr) minmax(0, 1.4fr);
+    gap: 0;
+    margin-top: 1.6rem;
+    border-top: 1px solid var(--hair);
+  }
+  .flow-in, .branch {
+    padding: 1.15rem 1rem 1.25rem 0;
+    border-bottom: 1px solid var(--hair);
+  }
+  .flow-in {
+    grid-row: 1 / span 3;
+    border-right: 1px solid var(--hair);
+    padding-right: 1.25rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .branch small, .flow-in small, .meta dt, .swatch figcaption, .contact figcaption {
+    display: block;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+  .flow strong, .meta dd, .frame b, .contact strong {
+    font-family: "Palatino Linotype", Palatino, "Songti SC", PMingLiU, SimSun, serif;
+    font-weight: 500;
+    font-size: 1.45rem;
+    line-height: 1.2;
+  }
+  .branch.aside strong { font-size: 1.2rem; }
+  .branch.live {
+    background: var(--gate);
+    padding-left: 0.9rem;
+  }
+
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    margin-top: 1.5rem;
+    border-top: 1px solid var(--hair);
+    border-bottom: 1px solid var(--hair);
+  }
+  .frame {
+    appearance: none;
+    margin: 0;
+    border: 0;
+    border-left: 1px solid var(--hair);
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    padding: 1rem 0.7rem 1.15rem;
+    cursor: pointer;
+    min-height: 7.5rem;
+    font: inherit;
+  }
+  .frame:first-child { border-left: 0; }
+  .frame b { display: block; font-size: 1.35rem; }
+  .frame span { color: var(--muted); font-size: 0.92rem; }
+  .frame[aria-checked="true"] {
+    background: var(--gate);
+    box-shadow: inset 0 -3px 0 var(--accent);
+  }
+  .frame[aria-checked="true"] b { color: var(--accent); }
+
+  .meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem 2rem;
+    margin: 1.75rem 0 0;
+    padding: 0;
+  }
+  .meta div { margin: 0; }
+  .meta dt { margin: 0; }
+  .meta dd { margin: 0.2rem 0 0; }
+  .wide { grid-column: 1 / -1; }
+
+  .pair {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.25rem;
+    margin: 1.5rem 0 0;
+  }
+  .swatch {
+    margin: 0;
+    min-height: 11rem;
+    position: relative;
+    background:
+      linear-gradient(45deg, var(--checker) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--checker) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--checker) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--checker) 75%);
+    background-size: 22px 22px;
+    background-position: 0 0, 0 11px, 11px -11px, -11px 0;
+    background-color: var(--bg);
+  }
+  .swatch i {
+    position: absolute;
+    inset: 12% 14%;
+    background: var(--ink);
+    font-style: normal;
+  }
+  .swatch.cut i { background: var(--veil); }
+  .swatch figcaption {
+    position: absolute;
+    left: 0.8rem;
+    bottom: 0.7rem;
+    color: var(--ink);
+    background: var(--bg);
+    padding: 0.1rem 0.35rem;
+  }
+
+  .contact {
+    display: grid;
+    grid-template-columns: 1.1fr 1.1fr 0.8fr;
+    gap: 1.25rem;
+    margin-top: 1.5rem;
+  }
+  .contact article {
+    margin: 0;
+    min-height: 16rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--hair);
+  }
+  .contact p { margin: 0.7rem 0 0; }
+  .blank {
+    background: var(--gate);
+    justify-content: flex-end;
+    padding: 1rem;
+    border-top: 0;
+    min-height: 16rem;
+  }
+  .blank strong {
+    font-size: clamp(2rem, 4vw, 3rem);
+    font-style: italic;
+  }
+  .sources { margin: 1rem 0 0; padding: 0; list-style: none; max-width: 42rem; }
+  .sources li { margin-top: 0.7rem; padding-top: 0.7rem; border-top: 1px solid var(--hair); }
+  .sources a { text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+  .note { margin-top: 2rem; max-width: 40rem; color: var(--muted); }
+
+  .reveal-armed .reveal {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  .reveal-armed .reveal.on {
+    opacity: 1;
+    transform: none;
+    transition: opacity 820ms ease, transform 820ms ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .reveal-armed .reveal,
+    .reveal-armed .reveal.on {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
+  }
+
+  @media (max-width: 800px) {
+    .sheet {
+      width: min(100% - 1.5rem, 1120px);
+      margin-left: auto;
+      margin-right: auto;
+      padding-top: 4.4rem;
+    }
+    .section { grid-template-columns: 1fr; margin-top: 3.5rem; }
+    .body { grid-column: 1; }
+    .flow, .strip, .meta, .pair, .contact { grid-template-columns: 1fr; }
+    .flow-in { grid-row: auto; border-right: 0; border-bottom: 1px solid var(--hair); }
+    .frame { border-left: 0; border-top: 1px solid var(--hair); min-height: 0; }
+    .frame:first-child { border-top: 0; }
+    .strip { border-bottom: 0; }
+  }
+
+  @media print {
+    :root,
+    :root[data-theme="dark"],
+    :root[data-theme="light"] {
+      color-scheme: light;
+      --bg: #ffffff;
+      --ink: #1a140e;
+      --muted: #3d342c;
+      --accent: #8a4e00;
+      --gate: #f6f1e6;
+      --veil: rgba(26, 20, 14, 0.5);
+      --checker: #d4cbb8;
+      --hair: rgba(26, 20, 14, 0.4);
+      --focus: #8a4e00;
+    }
+    body { background: #fff; color: #1a140e; }
+    .theme-toggle { display: none !important; }
+    .sheet { width: auto; margin: 0; padding: 0; }
+    .section { break-inside: avoid; }
+    .reveal, .reveal-armed .reveal, .reveal-armed .reveal.on {
+      opacity: 1 !important;
+      transform: none !important;
+    }
+  }
+</style>
+</head>
+<body>
+<button class="theme-toggle" type="button">切换纸样</button>
+<div class="sheet">
+  <header class="reveal">
+    <p class="edition">FFmpeg n9.0.2 · 2026-09-18</p>
+    <h1>六档都能送进片门<span>Alpha 要分两层看</span></h1>
+    <p class="lede">官方源码里，常规 ProRes 的硬解只有两条：macOS 上的 VideoToolbox，以及一块 Vulkan 计算着色器。NVDEC、QSV、VAAPI、AMF、D3D 都没有 ProRes 解码器。</p>
+    <p class="limit">像素格式的请求写在 n9.0.2 源码里。这台 Windows 没有 VideoToolbox，页面不展示硬解画面，也不引用别人的帧率当结果。</p>
+  </header>
+
+  <section class="section reveal" aria-labelledby="gate-title">
+    <p class="idx">01</p>
+    <div class="body">
+      <h2 id="gate-title">片门先读帧头，再决定谁来解</h2>
+      <div class="prose">
+        <p>软解和硬解共用同一个帧头。<code>alpha_info</code> 是第 17 字节的低 4 位：0 没有 alpha，1 是 8-bit，2 是 16-bit，大于 2 直接判非法。<code>skip_alpha</code> 会把这一位清掉，后面无论软解还是硬解都当成没有透明。</p>
+      </div>
+      <div class="flow" id="flow">
+        <div class="flow-in">
+          <small>帧头</small>
+          <strong id="flow-tag">ap4h</strong>
+          <small id="flow-alpha">alpha_info 可以是 0、1 或 2</small>
+        </div>
+        <div class="branch">
+          <small>软解 prores</small>
+          <strong id="flow-sw">yuva444p12le</strong>
+          <small id="flow-sw-note">有 alpha 时走 decode_slice_alpha</small>
+        </div>
+        <div class="branch live" id="flow-vt">
+          <small>VideoToolbox · Enable，不强制硬件</small>
+          <strong id="flow-vt-fmt">ayuv64le</strong>
+          <small id="flow-vt-note">有 alpha 时向 VT 要 16-bit 4:4:4:4</small>
+        </div>
+        <div class="branch aside">
+          <small>Vulkan 旁注 · 计算着色器，8.1 进入，9.0.2 仍在</small>
+          <strong id="flow-vk">dispatch 多 1 个平面</strong>
+          <small>输出是 Vulkan 图像，不是 ayuv64le</small>
+        </div>
+      </div>
+      <p class="cmd">ffmpeg -hwaccel videotoolbox -i 输入.mov -f null -<br>ffmpeg -hwaccel vulkan -i 输入.mov -f null -</p>
+      <p class="limit">第一条只存在于编进 Apple 平台的 FFmpeg。ProRes 用的是 EnableHardwareAcceleratedVideoDecoder，VideoToolbox 可以回落到 Apple 自己的软件解码器。源码还会调用 VTRegisterProfessionalVideoWorkflowVideoDecoders()。</p>
+    </div>
+  </section>
+
+  <section class="section reveal" aria-labelledby="strip-title">
+    <p class="idx">02</p>
+    <div class="body">
+      <h2 id="strip-title">同一条片子上的六档</h2>
+      <p class="prose">点一格，片门改写成这一档的像素格式。422 四档按格式不带 alpha，写成不适用，不当成硬解失败。</p>
+      <div class="strip" role="radiogroup" aria-label="ProRes 档位">
+        <button class="frame" type="button" role="radio" data-id="proxy" aria-checked="false" tabindex="-1"><b>Proxy</b><span>apco</span></button>
+        <button class="frame" type="button" role="radio" data-id="lt" aria-checked="false" tabindex="-1"><b>LT</b><span>apcs</span></button>
+        <button class="frame" type="button" role="radio" data-id="std" aria-checked="false" tabindex="-1"><b>422</b><span>apcn</span></button>
+        <button class="frame" type="button" role="radio" data-id="hq" aria-checked="false" tabindex="-1"><b>422 HQ</b><span>apch</span></button>
+        <button class="frame" type="button" role="radio" data-id="p4444" aria-checked="true" tabindex="0"><b>4444</b><span>ap4h</span></button>
+        <button class="frame" type="button" role="radio" data-id="xq" aria-checked="false" tabindex="-1"><b>4444 XQ</b><span>ap4x</span></button>
+      </div>
+      <dl class="meta" id="detail">
+        <div><dt>色度与位深</dt><dd id="d-signal">4:4:4 · 12-bit</dd></div>
+        <div><dt>软解像素</dt><dd id="d-sw">无 alpha 时 yuv444p12le，有 alpha 时 yuva444p12le</dd></div>
+        <div><dt>VideoToolbox 请求的表面</dt><dd id="d-vt">无 alpha 时 p416le，有 alpha 时 ayuv64le</dd></div>
+        <div><dt>码流能不能解析 alpha</dt><dd id="d-bit">能。帧头 alpha_info 为 0、1 或 2</dd></div>
+        <div class="wide"><dt>硬解表面里有没有 alpha</dt><dd id="d-hw">FFmpeg 在软件格式带 alpha 时向 VT 要 ayuv64le（kCVPixelFormatType_4444AYpCbCr16）。这是请求，不是这台机器上看到的画面。</dd></div>
+      </dl>
+      <p class="note" id="live" aria-live="polite">当前在片门里：4444，ap4h。</p>
+    </div>
+  </section>
+
+  <section class="section reveal" aria-labelledby="alpha-title">
+    <p class="idx">03</p>
+    <div class="body">
+      <h2 id="alpha-title">棋盘格还在，才算 alpha 进了像素</h2>
+      <div class="pair">
+        <figure class="swatch">
+          <i></i>
+          <figcaption>只有彩色。底下的棋盘被盖住。</figcaption>
+        </figure>
+        <figure class="swatch cut">
+          <i></i>
+          <figcaption>彩色带着 alpha。棋盘还透出来。</figcaption>
+        </figure>
+      </div>
+      <div class="prose">
+        <p>第一层在帧头。解析器不管最后谁解码，都会读 <code>alpha_info</code>。规范里会用到它的是 4444 和 4444 XQ。422 的四档正常文件没有这一层数据。</p>
+        <p>第二层在硬解交出来的表面。VideoToolbox 路径看到软件像素格式带 alpha 标志，就改要 <code>ayuv64le</code>，不再要 <code>p210le</code> 或 <code>p416le</code>。旧的 macOS SDK 如果没有那些 10-bit / 16-bit biplanar 常量，无 alpha 的请求会落到 <code>nv12</code>。</p>
+        <p>Vulkan 路径把同一个 <code>alpha_info</code> 推进着色器。有 alpha 时多派发一个平面，清图时故意不清 alpha。它解的是 GPU 图像，不经过 AYUV64。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section reveal" aria-labelledby="demo-title">
+    <p class="idx">04</p>
+    <div class="body">
+      <h2 id="demo-title">能看的演示，和一张没曝光的底片</h2>
+      <div class="contact">
+        <article>
+          <div>
+            <strong>WWDC20 · 10090</strong>
+            <p>Apple 自己讲怎样用 VideoToolbox 解 ProRes，再交给 Metal，也会讲到 Afterburner。能看的是这条系统管线。</p>
+          </div>
+          <p><a href="https://developer.apple.com/videos/play/wwdc2020/10090/">打开这场演讲</a>。它不是 FFmpeg 的像素对比。</p>
+        </article>
+        <article>
+          <div>
+            <strong>TurboRes</strong>
+            <p>浏览器里可以拖进 ProRes，看着软解结果。作者在仓库 README 里写过自己机器上的 FFmpeg 硬解帧率，播放器本身不是硬解。</p>
+          </div>
+          <p><a href="https://turbores.pages.dev/">打开浏览器演示</a> · <a href="https://github.com/Vanilagy/turbores">源码与基准说明</a></p>
+        </article>
+        <article class="blank">
+          <strong>未曝光</strong>
+          <p>没有找到能直接观看 FFmpeg ProRes 硬解画面的网站。浏览器播不了 ProRes，硬解又绑在 macOS 的 VideoToolbox 或本机 Vulkan 上。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section reveal" aria-labelledby="src-title">
+    <p class="idx">05</p>
+    <div class="body">
+      <h2 id="src-title">片边码</h2>
+      <ul class="sources">
+        <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavcodec/proresdec.c">proresdec.c</a>：六档 FourCC、alpha_info、软解 alpha、hwaccel 列表。</li>
+        <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavcodec/videotoolbox.c">videotoolbox.c</a>：六档都送进 cm_codec_type；ProRes 用 Enable 而不是 Require；带 alpha 时请求 ayuv64le。</li>
+        <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavutil/hwcontext_videotoolbox.c">hwcontext_videotoolbox.c</a>：kCVPixelFormatType_4444AYpCbCr16 映射到 AYUV64。</li>
+        <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavcodec/vulkan_prores.c">vulkan_prores.c</a>：alpha_info 进入着色器，有 alpha 时多一个平面。</li>
+        <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/Changelog">Changelog</a>：VideoToolbox ProRes 记在 5.0，Vulkan ProRes 记在 8.1，ProRes RAW 的 VideoToolbox 记在 9.0。</li>
+        <li><a href="https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/configure">configure</a>：ProRes 硬解只有 videotoolbox 与 vulkan 两行，另加 RAW 的两行。</li>
+        <li><a href="https://trac.ffmpeg.org/wiki/HWAccelIntro">FFmpeg HWAccelIntro</a>：VideoToolbox 的解码列表里有 ProRes。</li>
+      </ul>
+      <div class="note">
+        <p>ProRes RAW 是另一个 codec id。n9.0.2 有 prores_raw_videotoolbox，8.0 起就有软解和 prores_raw_vulkan。它走的是拜耳数据，没有 4444 这种 alpha 平面，所以没有放进上面六格。</p>
+        <p>页面根据 n9.0.2 源码写成。没有在 Apple Silicon 上复现硬解，也没有区分媒体引擎、Afterburner 和 VideoToolbox 内部软解。</p>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+  document.querySelector('.theme-toggle').addEventListener('click', function () {
+    var k = 'theme-prores-hwdec-20261022', root = document.documentElement;
+    var dark = root.dataset.theme
+      ? root.dataset.theme === 'dark'
+      : matchMedia('(prefers-color-scheme: dark)').matches;
+    root.dataset.theme = dark ? 'light' : 'dark';
+    this.textContent = root.dataset.theme === 'dark' ? '切换纸样' : '切换暗房';
+    try { localStorage.setItem(k, root.dataset.theme); } catch (e) {}
+  });
+  (function () {
+    var root = document.documentElement;
+    var dark = root.dataset.theme
+      ? root.dataset.theme === 'dark'
+      : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.querySelector('.theme-toggle').textContent = dark ? '切换纸样' : '切换暗房';
+  })();
+</script>
+<script>
+  (function () {
+    var profiles = {
+      proxy: { name: 'Proxy', tag: 'apco', signal: '4:2:2 · 10-bit', alpha: false,
+        sw: 'yuv422p10le', vt: 'p210le',
+        swNote: '正常文件没有 alpha 平面',
+        alphaHead: '这一档的帧头按规范不带 alpha',
+        vtNote: '无 alpha。SDK 有 10-bit 4:2:2 时请求 p210le',
+        vk: '三个颜色平面',
+        bit: '不适用。规范上的 Proxy 不带 alpha。',
+        hw: '不适用。FFmpeg 向 VideoToolbox 要 p210le，不要求 alpha 表面。' },
+      lt: { name: 'LT', tag: 'apcs', signal: '4:2:2 · 10-bit', alpha: false,
+        sw: 'yuv422p10le', vt: 'p210le',
+        swNote: '正常文件没有 alpha 平面',
+        alphaHead: '这一档的帧头按规范不带 alpha',
+        vtNote: '无 alpha。SDK 有 10-bit 4:2:2 时请求 p210le',
+        vk: '三个颜色平面',
+        bit: '不适用。规范上的 LT 不带 alpha。',
+        hw: '不适用。FFmpeg 向 VideoToolbox 要 p210le，不要求 alpha 表面。' },
+      std: { name: '422', tag: 'apcn', signal: '4:2:2 · 10-bit', alpha: false,
+        sw: 'yuv422p10le', vt: 'p210le',
+        swNote: '正常文件没有 alpha 平面',
+        alphaHead: '这一档的帧头按规范不带 alpha',
+        vtNote: '无 alpha。SDK 有 10-bit 4:2:2 时请求 p210le',
+        vk: '三个颜色平面',
+        bit: '不适用。规范上的 422 不带 alpha。',
+        hw: '不适用。FFmpeg 向 VideoToolbox 要 p210le，不要求 alpha 表面。' },
+      hq: { name: '422 HQ', tag: 'apch', signal: '4:2:2 · 10-bit', alpha: false,
+        sw: 'yuv422p10le', vt: 'p210le',
+        swNote: '正常文件没有 alpha 平面',
+        alphaHead: '这一档的帧头按规范不带 alpha',
+        vtNote: '无 alpha。SDK 有 10-bit 4:2:2 时请求 p210le',
+        vk: '三个颜色平面',
+        bit: '不适用。规范上的 422 HQ 不带 alpha。',
+        hw: '不适用。FFmpeg 向 VideoToolbox 要 p210le，不要求 alpha 表面。' },
+      p4444: { name: '4444', tag: 'ap4h', signal: '4:4:4 · 12-bit', alpha: true,
+        sw: 'yuva444p12le', vt: 'ayuv64le',
+        swNote: '无 alpha 时是 yuv444p12le；有则 decode_slice_alpha',
+        alphaHead: 'alpha_info 可以是 0、1 或 2',
+        vtNote: '有 alpha 时向 VT 要 ayuv64le；没有则要 p416le',
+        vk: 'dispatch 多 1 个平面',
+        bit: '能。帧头 alpha_info 为 0、1 或 2，软解分别忽略、按 8-bit 或按 16-bit 解。',
+        hw: 'FFmpeg 在软件格式带 alpha 时向 VT 要 ayuv64le（kCVPixelFormatType_4444AYpCbCr16）。这是请求，不是这台机器上看到的画面。无 alpha 时请求 p416le。' },
+      xq: { name: '4444 XQ', tag: 'ap4x', signal: '4:4:4 · 12-bit', alpha: true,
+        sw: 'yuva444p12le', vt: 'ayuv64le',
+        swNote: '无 alpha 时是 yuv444p12le；有则 decode_slice_alpha',
+        alphaHead: 'alpha_info 可以是 0、1 或 2',
+        vtNote: '有 alpha 时向 VT 要 ayuv64le；没有则要 p416le',
+        vk: 'dispatch 多 1 个平面',
+        bit: '能。和 4444 同一套帧头：0 无，1 为 8-bit，2 为 16-bit。',
+        hw: '和 4444 相同：有 alpha 时请求 ayuv64le，没有时请求 p416le。源码没有单独为 XQ 关掉 alpha。' }
+    };
+    var buttons = Array.prototype.slice.call(document.querySelectorAll('.frame'));
+    function show(id) {
+      var p = profiles[id];
+      buttons.forEach(function (b) {
+        var on = b.getAttribute('data-id') === id;
+        b.setAttribute('aria-checked', on ? 'true' : 'false');
+        b.tabIndex = on ? 0 : -1;
+      });
+      document.getElementById('flow-tag').textContent = p.tag;
+      document.getElementById('flow-alpha').textContent = p.alphaHead;
+      document.getElementById('flow-sw').textContent = p.sw;
+      document.getElementById('flow-sw-note').textContent = p.swNote;
+      document.getElementById('flow-vt-fmt').textContent = p.vt;
+      document.getElementById('flow-vt-note').textContent = p.vtNote;
+      document.getElementById('flow-vk').textContent = p.vk;
+      document.getElementById('d-signal').textContent = p.signal;
+      document.getElementById('d-sw').textContent = p.alpha
+        ? '无 alpha 时 yuv444p12le，有 alpha 时 ' + p.sw
+        : p.sw;
+      document.getElementById('d-vt').textContent = p.alpha
+        ? '无 alpha 时 p416le，有 alpha 时 ' + p.vt
+        : p.vt;
+      document.getElementById('d-bit').textContent = p.bit;
+      document.getElementById('d-hw').textContent = p.hw;
+      document.getElementById('live').textContent = '当前在片门里：' + p.name + '，' + p.tag + '。';
+    }
+    buttons.forEach(function (b, i) {
+      b.addEventListener('click', function () { show(b.getAttribute('data-id')); });
+      b.addEventListener('keydown', function (e) {
+        var next = null;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = buttons[(i + 1) % buttons.length];
+        if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = buttons[(i + buttons.length - 1) % buttons.length];
+        if (e.key === 'Home') next = buttons[0];
+        if (e.key === 'End') next = buttons[buttons.length - 1];
+        if (!next) return;
+        e.preventDefault();
+        next.focus();
+        show(next.getAttribute('data-id'));
+      });
+    });
+  })();
+</script>
+<script>
+  (function () {
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches
+        || !('IntersectionObserver' in window)) return;
+    document.documentElement.classList.add('reveal-armed');
+    var targets = Array.prototype.slice.call(document.querySelectorAll('.reveal'));
+    var fired = false;
+    var io = new IntersectionObserver(function (es) {
+      fired = true;
+      es.forEach(function (e) {
+        if (!e.isIntersecting) return;
+        for (var j = 0; j <= targets.indexOf(e.target); j++) {
+          targets[j].classList.add('on');
+          io.unobserve(targets[j]);
+        }
+      });
+    }, { threshold: 0.15 });
+    targets.forEach(function (el) { io.observe(el); });
+    setTimeout(function () {
+      if (!fired) targets.forEach(function (el) { el.classList.add('on'); });
+    }, 1400);
+  })();
+</script>
+</body>
+</html>

@@ -1,0 +1,43 @@
+#pragma once
+
+#include <QMainWindow>
+
+class Player;
+class QLabel;
+class QSlider;
+class QTimer;
+class VideoWidget;
+
+class MainWindow : public QMainWindow {
+    Q_OBJECT
+public:
+    explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
+
+protected:
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
+
+private:
+    void openPath(const QString& path);
+    void openFileDialog();
+    void openFolderDialog();
+    void showInfo();
+    void onTick();
+    void play();
+    void pause();
+    void stopPlayback();
+    void seekBack();
+    void seekForward();
+    void toggleLoop(bool on);
+
+    Player* m_player = nullptr;
+    VideoWidget* m_video = nullptr;
+    QLabel* m_title = nullptr;
+    QLabel* m_status = nullptr;
+    QLabel* m_time = nullptr;
+    QSlider* m_slider = nullptr;
+    QTimer* m_timer = nullptr;
+    bool m_scrubbing = false;
+};
