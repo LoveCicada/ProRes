@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "GpuAdapter.h"
 #include "MediaProbe.h"
 #include "Player.h"
 #include "VideoWidget.h"
@@ -27,6 +28,7 @@
 #include <QVBoxLayout>
 #include <QDir>
 #include <QUrl>
+#include <QVector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -112,6 +114,55 @@ private:
     }
 };
 
+QVector<GpuAdapter> listAdapters()
+{
+    QVector<GpuAdapter> adapters;
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory))))
+        return adapters;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+        DXGI_ADAPTER_DESC1 desc = {};
+        if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+            GpuAdapter gpu;
+            gpu.luidHigh = desc.AdapterLuid.HighPart;
+            gpu.luidLow = desc.AdapterLuid.LowPart;
+            gpu.name = QString::fromWCharArray(desc.Description);
+            gpu.valid = true;
+            adapters.push_back(gpu);
+        }
+        adapter->Release();
+    }
+    factory->Release();
+    return adapters;
+}
+
+GpuAdapter savedAdapter()
+{
+    const QVector<GpuAdapter> adapters = listAdapters();
+    if (adapters.isEmpty())
+        return {};
+    QSettings settings;
+    const bool hasNewKey = settings.contains(QStringLiteral("gpuAuto"));
+    const bool automatic = hasNewKey
+        ? settings.value(QStringLiteral("gpuAuto"), true).toBool()
+        : settings.value(QStringLiteral("gpuIndex"), -1).toInt() < 0;
+    if (automatic)
+        return adapters.first();
+    const qint64 high = settings.value(QStringLiteral("gpuLuidHigh")).toLongLong();
+    const quint32 low = settings.value(QStringLiteral("gpuLuidLow")).toUInt();
+    for (const GpuAdapter& gpu : adapters) {
+        if (gpu.luidHigh == high && gpu.luidLow == low)
+            return gpu;
+    }
+    if (!hasNewKey) {
+        const int index = settings.value(QStringLiteral("gpuIndex"), 0).toInt();
+        if (index >= 0 && index < adapters.size())
+            return adapters.at(index);
+    }
+    return adapters.first();
+}
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -172,11 +223,9 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(root);
 
     m_player = new Player(this);
-    {
-        QSettings settings;
-        m_player->setGpu(settings.value(QStringLiteral("gpuIndex"), -1).toInt(),
-                         settings.value(QStringLiteral("gpuName")).toString());
-    }
+    const GpuAdapter startupGpu = savedAdapter();
+    m_player->setGpu(startupGpu);
+    m_video->setAdapter(startupGpu.luidHigh, startupGpu.luidLow);
     connect(m_player, &Player::statusChanged, m_status, &QLabel::setText);
     connect(m_player, &Player::timingChanged, this, [this](qint64 pos, qint64 dur) {
         m_time->setText(formatTime(pos) + QStringLiteral(" / ") + formatTime(dur));
@@ -315,7 +364,11 @@ void MainWindow::showInfo()
 void MainWindow::showSettings()
 {
     QSettings settings;
-    const int saved = settings.value(QStringLiteral("gpuIndex"), -1).toInt();
+    const bool savedAuto = settings.contains(QStringLiteral("gpuAuto"))
+        ? settings.value(QStringLiteral("gpuAuto"), true).toBool()
+        : settings.value(QStringLiteral("gpuIndex"), -1).toInt() < 0;
+    const qint64 savedHigh = settings.value(QStringLiteral("gpuLuidHigh")).toLongLong();
+    const quint32 savedLow = settings.value(QStringLiteral("gpuLuidLow")).toUInt();
 
     QDialog dialog(this);
     dialog.setWindowTitle(QString::fromUtf8("\xE8\xAE\xBE\xE7\xBD\xAE"));
@@ -323,37 +376,49 @@ void MainWindow::showSettings()
     auto* box = new QVBoxLayout(&dialog);
     auto* label = new QLabel(QString::fromUtf8("\xE6\x98\xBE\xE5\x8D\xA1"), &dialog);
     auto* combo = new QComboBox(&dialog);
-    combo->addItem(QString::fromUtf8("\xE8\x87\xAA\xE5\x8A\xA8"), -1);
+    combo->addItem(QString::fromUtf8("\xE8\x87\xAA\xE5\x8A\xA8"), QStringLiteral("auto"));
 
-    IDXGIFactory1* factory = nullptr;
-    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
-        IDXGIAdapter1* adapter = nullptr;
-        for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
-            DXGI_ADAPTER_DESC1 desc = {};
-            if (SUCCEEDED(adapter->GetDesc1(&desc))) {
-                const QString name = QString::fromWCharArray(desc.Description);
-                combo->addItem(QString::number(i) + QStringLiteral(": ") + name, static_cast<int>(i));
-            }
-            adapter->Release();
-        }
-        factory->Release();
+    const QVector<GpuAdapter> adapters = listAdapters();
+    for (const GpuAdapter& gpu : adapters) {
+        const QString key = QString::number(gpu.luidHigh) + QLatin1Char(':') + QString::number(gpu.luidLow);
+        combo->addItem(gpu.name, key);
     }
 
-    const int row = combo->findData(saved);
-    combo->setCurrentIndex(row >= 0 ? row : 0);
+    int row = 0;
+    if (!savedAuto) {
+        const QString key = QString::number(savedHigh) + QLatin1Char(':') + QString::number(savedLow);
+        const int found = combo->findData(key);
+        if (found >= 0)
+            row = found;
+    }
+    combo->setCurrentIndex(row);
     auto* ok = new QPushButton(QString::fromUtf8("\xE7\xA1\xAE\xE5\xAE\x9A"), &dialog);
     connect(ok, &QPushButton::clicked, &dialog, &QDialog::accept);
     box->addWidget(label);
     box->addWidget(combo);
     box->addWidget(ok, 0, Qt::AlignRight);
-    if (dialog.exec() != QDialog::Accepted)
+    if (dialog.exec() != QDialog::Accepted || adapters.isEmpty())
         return;
 
-    const int gpu = combo->currentData().toInt();
-    const QString gpuName = gpu < 0 ? QString() : combo->currentText();
-    settings.setValue(QStringLiteral("gpuIndex"), gpu);
-    settings.setValue(QStringLiteral("gpuName"), gpuName);
-    m_player->setGpu(gpu, gpuName);
+    const bool automatic = combo->currentData().toString() == QLatin1String("auto");
+    const GpuAdapter chosen = automatic ? adapters.first() : [&] {
+        const QString key = combo->currentData().toString();
+        const int split = key.indexOf(QLatin1Char(':'));
+        const qint64 high = key.left(split).toLongLong();
+        const quint32 low = key.mid(split + 1).toUInt();
+        for (const GpuAdapter& gpu : adapters) {
+            if (gpu.luidHigh == high && gpu.luidLow == low)
+                return gpu;
+        }
+        return adapters.first();
+    }();
+
+    settings.setValue(QStringLiteral("gpuAuto"), automatic);
+    settings.setValue(QStringLiteral("gpuLuidHigh"), chosen.luidHigh);
+    settings.setValue(QStringLiteral("gpuLuidLow"), chosen.luidLow);
+    settings.setValue(QStringLiteral("gpuName"), chosen.name);
+    m_player->setGpu(chosen);
+    m_video->setAdapter(chosen.luidHigh, chosen.luidLow);
     if (!m_player->filePath().isEmpty())
         openPath(m_player->filePath());
 }

@@ -65,6 +65,9 @@ struct VideoWidget::Impl {
     int texW = 0;
     int texH = 0;
     bool ready = false;
+    bool hasLuid = false;
+    qint64 luidHigh = 0;
+    quint32 luidLow = 0;
 };
 
 VideoWidget::VideoWidget(QWidget* parent)
@@ -113,6 +116,38 @@ void VideoWidget::applyRound()
     SetWindowRgn(reinterpret_cast<HWND>(winId()), region, TRUE);
 }
 
+void VideoWidget::releaseDevice()
+{
+    if (d->context)
+        d->context->OMSetRenderTargets(0, nullptr, nullptr);
+    d->target.Reset();
+    d->srv.Reset();
+    d->texture.Reset();
+    d->texW = 0;
+    d->texH = 0;
+    d->swap.Reset();
+    d->vs.Reset();
+    d->ps.Reset();
+    d->layout.Reset();
+    d->vertices.Reset();
+    d->constants.Reset();
+    d->sampler.Reset();
+    d->context.Reset();
+    d->device.Reset();
+    d->ready = false;
+}
+
+void VideoWidget::setAdapter(qint64 luidHigh, quint32 luidLow)
+{
+    if (d->hasLuid && d->luidHigh == luidHigh && d->luidLow == luidLow)
+        return;
+    d->hasLuid = true;
+    d->luidHigh = luidHigh;
+    d->luidLow = luidLow;
+    releaseDevice();
+    ensureDevice();
+}
+
 void VideoWidget::ensureDevice()
 {
     if (d->ready || width() < 2 || height() < 2)
@@ -129,10 +164,29 @@ void VideoWidget::ensureDevice()
     desc.Windowed = TRUE;
     desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
+    ComPtr<IDXGIAdapter1> adapter;
+    if (d->hasLuid) {
+        ComPtr<IDXGIFactory1> factory;
+        if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(factory.GetAddressOf())))) {
+            ComPtr<IDXGIAdapter1> current;
+            for (UINT i = 0; factory->EnumAdapters1(i, current.ReleaseAndGetAddressOf()) != DXGI_ERROR_NOT_FOUND; ++i) {
+                DXGI_ADAPTER_DESC1 info = {};
+                if (FAILED(current->GetDesc1(&info)))
+                    continue;
+                if (info.AdapterLuid.HighPart == d->luidHigh
+                    && info.AdapterLuid.LowPart == d->luidLow) {
+                    adapter = current;
+                    break;
+                }
+            }
+        }
+    }
+
     const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_0 };
     D3D_FEATURE_LEVEL chosen = D3D_FEATURE_LEVEL_11_0;
+    const D3D_DRIVER_TYPE driver = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
     HRESULT hr = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+        adapter.Get(), driver, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
         levels, 2, D3D11_SDK_VERSION, &desc, d->swap.GetAddressOf(),
         d->device.GetAddressOf(), &chosen, d->context.GetAddressOf());
     if (FAILED(hr))

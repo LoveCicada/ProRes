@@ -8,10 +8,16 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -32,13 +38,39 @@ struct PcmChunk {
     std::vector<uint8_t> bytes;
 };
 
+struct FormatChoice {
+    bool triedVulkan = false;
+};
+
+AVPixelFormat softwareFormat(const AVPixelFormat* formats)
+{
+    for (const AVPixelFormat* fmt = formats; *fmt != AV_PIX_FMT_NONE; ++fmt) {
+        if (*fmt != AV_PIX_FMT_VULKAN)
+            return *fmt;
+    }
+    return formats[0];
+}
+
 AVPixelFormat getVulkanFormat(AVCodecContext*, const AVPixelFormat* formats)
 {
     for (const AVPixelFormat* fmt = formats; *fmt != AV_PIX_FMT_NONE; ++fmt) {
         if (*fmt == AV_PIX_FMT_VULKAN)
             return *fmt;
     }
-    return formats[0];
+    return softwareFormat(formats);
+}
+
+AVPixelFormat probeGetFormat(AVCodecContext* ctx, const AVPixelFormat* formats)
+{
+    auto* choice = static_cast<FormatChoice*>(ctx->opaque);
+    if (choice && !choice->triedVulkan) {
+        choice->triedVulkan = true;
+        for (const AVPixelFormat* fmt = formats; *fmt != AV_PIX_FMT_NONE; ++fmt) {
+            if (*fmt == AV_PIX_FMT_VULKAN)
+                return *fmt;
+        }
+    }
+    return softwareFormat(formats);
 }
 
 double stampSeconds(int64_t ts, AVRational timeBase, double fallback)
@@ -46,6 +78,174 @@ double stampSeconds(int64_t ts, AVRational timeBase, double fallback)
     if (ts == AV_NOPTS_VALUE)
         return fallback;
     return ts * av_q2d(timeBase);
+}
+
+int vulkanDeviceIndex(qint64 luidHigh, quint32 luidLow)
+{
+    const HMODULE library = LoadLibraryW(L"vulkan-1.dll");
+    if (!library)
+        return -1;
+
+    using FnGetProc = void* (__stdcall*)(void*, const char*);
+    using FnCreate = int (__stdcall*)(const void*, const void*, void**);
+    using FnDestroy = void (__stdcall*)(void*, const void*);
+    using FnEnum = int (__stdcall*)(void*, uint32_t*, void**);
+    using FnProps = void (__stdcall*)(void*, void*);
+
+    auto getProc = reinterpret_cast<FnGetProc>(GetProcAddress(library, "vkGetInstanceProcAddr"));
+    if (!getProc) {
+        FreeLibrary(library);
+        return -1;
+    }
+    auto createInstance = reinterpret_cast<FnCreate>(getProc(nullptr, "vkCreateInstance"));
+    if (!createInstance) {
+        FreeLibrary(library);
+        return -1;
+    }
+
+    struct AppInfo {
+        uint32_t sType;
+        const void* pNext;
+        const char* applicationName;
+        uint32_t applicationVersion;
+        const char* engineName;
+        uint32_t engineVersion;
+        uint32_t apiVersion;
+    };
+    struct InstanceInfo {
+        uint32_t sType;
+        const void* pNext;
+        uint32_t flags;
+        const AppInfo* applicationInfo;
+        uint32_t enabledLayerCount;
+        const char* const* enabledLayerNames;
+        uint32_t enabledExtensionCount;
+        const char* const* enabledExtensionNames;
+    };
+    AppInfo app = {};
+    app.sType = 0;
+    app.apiVersion = (1u << 22) | (3u << 12);
+    InstanceInfo instanceInfo = {};
+    instanceInfo.sType = 1;
+    instanceInfo.applicationInfo = &app;
+
+    void* instance = nullptr;
+    if (createInstance(&instanceInfo, nullptr, &instance) != 0 || !instance) {
+        FreeLibrary(library);
+        return -1;
+    }
+    auto destroyInstance = reinterpret_cast<FnDestroy>(getProc(instance, "vkDestroyInstance"));
+    auto enumerate = reinterpret_cast<FnEnum>(getProc(instance, "vkEnumeratePhysicalDevices"));
+    auto properties2 = reinterpret_cast<FnProps>(getProc(instance, "vkGetPhysicalDeviceProperties2"));
+    int found = -1;
+    if (enumerate && properties2) {
+        uint32_t count = 0;
+        enumerate(instance, &count, nullptr);
+        std::vector<void*> devices(count);
+        if (count > 0 && enumerate(instance, &count, devices.data()) == 0) {
+            struct IdProps {
+                uint32_t sType;
+                void* pNext;
+                uint8_t deviceUUID[16];
+                uint8_t driverUUID[16];
+                uint8_t deviceLUID[8];
+                uint32_t deviceNodeMask;
+                uint32_t deviceLUIDValid;
+            };
+            struct Props2 {
+                uint32_t sType;
+                void* pNext;
+                unsigned char properties[2048];
+            };
+            uint8_t wanted[8] = {};
+            const uint32_t low = luidLow;
+            const int32_t high = static_cast<int32_t>(luidHigh);
+            memcpy(wanted, &low, 4);
+            memcpy(wanted + 4, &high, 4);
+            for (uint32_t i = 0; i < count; ++i) {
+                IdProps id = {};
+                id.sType = 1000071004;
+                Props2 props = {};
+                props.sType = 1000059001;
+                props.pNext = &id;
+                properties2(devices[i], &props);
+                if (id.deviceLUIDValid && memcmp(id.deviceLUID, wanted, 8) == 0) {
+                    found = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+    }
+    if (destroyInstance)
+        destroyInstance(instance, nullptr);
+    FreeLibrary(library);
+    return found;
+}
+
+bool probeHardwareDecode(const char* path, int vulkanIndex)
+{
+    if (!path || vulkanIndex < 0)
+        return false;
+    const int previous = av_log_get_level();
+    av_log_set_level(AV_LOG_FATAL);
+    bool supported = false;
+
+    AVFormatContext* format = nullptr;
+    AVCodecContext* ctx = nullptr;
+    AVBufferRef* hw = nullptr;
+    AVPacket* packet = nullptr;
+    AVFrame* frame = nullptr;
+    FormatChoice choice;
+
+    const bool opened = avformat_open_input(&format, path, nullptr, nullptr) >= 0
+        && avformat_find_stream_info(format, nullptr) >= 0;
+    const int videoIndex = opened
+        ? av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0)
+        : -1;
+    const bool prores = videoIndex >= 0
+        && format->streams[videoIndex]->codecpar->codec_id == AV_CODEC_ID_PRORES;
+    const std::string deviceName = std::to_string(vulkanIndex);
+    const bool deviceOk = prores
+        && av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_VULKAN, deviceName.c_str(), nullptr, 0) >= 0;
+    const AVCodec* codec = deviceOk ? avcodec_find_decoder(AV_CODEC_ID_PRORES) : nullptr;
+    if (codec)
+        ctx = avcodec_alloc_context3(codec);
+    const bool paramsOk = ctx && avcodec_parameters_to_context(ctx, format->streams[videoIndex]->codecpar) >= 0;
+    if (paramsOk) {
+        ctx->hw_device_ctx = av_buffer_ref(hw);
+        ctx->opaque = &choice;
+        ctx->get_format = probeGetFormat;
+    }
+    if (paramsOk && avcodec_open2(ctx, codec, nullptr) >= 0) {
+        packet = av_packet_alloc();
+        frame = av_frame_alloc();
+        while (av_read_frame(format, packet) >= 0) {
+            if (packet->stream_index != videoIndex) {
+                av_packet_unref(packet);
+                continue;
+            }
+            const int sent = avcodec_send_packet(ctx, packet);
+            av_packet_unref(packet);
+            if (sent < 0)
+                break;
+            const int received = avcodec_receive_frame(ctx, frame);
+            if (received == 0) {
+                supported = frame->format == AV_PIX_FMT_VULKAN;
+                av_frame_unref(frame);
+                break;
+            }
+            if (received != AVERROR(EAGAIN))
+                break;
+        }
+    }
+
+    av_frame_free(&frame);
+    av_packet_free(&packet);
+    avcodec_free_context(&ctx);
+    av_buffer_unref(&hw);
+    avformat_close_input(&format);
+    av_log_set_level(previous);
+    return supported;
 }
 
 } // namespace
@@ -59,7 +259,8 @@ struct Player::Engine {
     std::atomic<bool> running { false };
     std::atomic<bool> seekPending { false };
     std::atomic<bool> loop { false };
-    std::atomic<int> gpuIndex { -1 };
+    std::atomic<qint64> luidHigh { 0 };
+    std::atomic<quint32> luidLow { 0 };
     QString gpuName;
     std::mutex waitMutex;
     std::condition_variable waitCv;
@@ -306,11 +507,12 @@ void Player::setLoop(bool on)
     m->pcmCv.notify_all();
 }
 
-void Player::setGpu(int index, const QString& name)
+void Player::setGpu(const GpuAdapter& adapter)
 {
-    m->gpuIndex = index;
+    m->luidHigh = adapter.luidHigh;
+    m->luidLow = adapter.luidLow;
     std::lock_guard<std::mutex> lock(m->statusMutex);
-    m->gpuName = name;
+    m->gpuName = adapter.name;
 }
 
 bool Player::takeFrameForClock(VideoFrame& out)
@@ -471,6 +673,11 @@ void Player::decodeLoop(const QString& path)
         return;
     }
 
+    const bool prores = format->streams[videoIndex]->codecpar->codec_id == AV_CODEC_ID_PRORES;
+    const int vulkanIndex = prores ? vulkanDeviceIndex(m->luidHigh.load(), m->luidLow.load()) : -1;
+    const QByteArray pathUtf8 = path.toUtf8();
+    const bool useHardware = vulkanIndex >= 0 && probeHardwareDecode(pathUtf8.constData(), vulkanIndex);
+
     auto openDecoder = [&](int index, bool tryVulkan, AVCodecContext** out, AVBufferRef** hw) {
         *out = nullptr;
         *hw = nullptr;
@@ -484,11 +691,9 @@ void Player::decodeLoop(const QString& path)
             return false;
         }
         bool hwOn = false;
-        if (tryVulkan && stream->codecpar->codec_id == AV_CODEC_ID_PRORES) {
-            const int gpu = m->gpuIndex.load();
-            const std::string deviceName = gpu >= 0 ? std::to_string(gpu) : std::string();
-            const char* device = deviceName.empty() ? nullptr : deviceName.c_str();
-            if (av_hwdevice_ctx_create(hw, AV_HWDEVICE_TYPE_VULKAN, device, nullptr, 0) == 0) {
+        if (tryVulkan) {
+            const std::string deviceName = std::to_string(vulkanIndex);
+            if (av_hwdevice_ctx_create(hw, AV_HWDEVICE_TYPE_VULKAN, deviceName.c_str(), nullptr, 0) == 0) {
                 ctx->hw_device_ctx = av_buffer_ref(*hw);
                 ctx->get_format = getVulkanFormat;
                 hwOn = true;
@@ -515,8 +720,7 @@ void Player::decodeLoop(const QString& path)
 
     AVCodecContext* videoCtx = nullptr;
     AVBufferRef* hwDevice = nullptr;
-    const bool prores = format->streams[videoIndex]->codecpar->codec_id == AV_CODEC_ID_PRORES;
-    if (!openDecoder(videoIndex, prores, &videoCtx, &hwDevice)) {
+    if (!openDecoder(videoIndex, useHardware, &videoCtx, &hwDevice)) {
         avformat_close_input(&format);
         fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
         return;
@@ -524,7 +728,7 @@ void Player::decodeLoop(const QString& path)
     QString mode = hwDevice
         ? QString::fromUtf8("\xE7\xA1\xAC\xE8\xA7\xA3\x20\x56\x75\x6C\x6B\x61\x6E")
         : QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3");
-    if (hwDevice && m->gpuIndex.load() >= 0) {
+    if (hwDevice) {
         QString gpuName;
         {
             std::lock_guard<std::mutex> lock(m->statusMutex);
@@ -534,6 +738,10 @@ void Player::decodeLoop(const QString& path)
             mode += QStringLiteral(" · ") + gpuName;
     }
     m->setStatus(mode);
+    QMetaObject::invokeMethod(this, [this, mode] {
+        m->shownStatus = mode;
+        emit statusChanged(mode);
+    }, Qt::QueuedConnection);
 
     AVCodecContext* audioCtx = nullptr;
     AVBufferRef* unusedHw = nullptr;

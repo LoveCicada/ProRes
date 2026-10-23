@@ -13,6 +13,7 @@ public:
 
     void present(const VideoFrame& frame);
     void clear();
+    void setAdapter(qint64 luidHigh, quint32 luidLow);
 
 protected:
     QPaintEngine* paintEngine() const override;
@@ -22,6 +23,7 @@ protected:
 
 private:
     void ensureDevice();
+    void releaseDevice();
     void applyRound();
     void resizeSwapChain();
 

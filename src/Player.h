@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+#include "GpuAdapter.h"
+
 struct VideoFrame {
     int width = 0;
     int height = 0;
@@ -26,7 +28,7 @@ public:
     void seekSeconds(double seconds);
     void seekRelative(double deltaSeconds);
     void setLoop(bool on);
-    void setGpu(int index, const QString& name);
+    void setGpu(const GpuAdapter& adapter);
 
     bool takeFrameForClock(VideoFrame& out);
     qint64 positionMs() const;
