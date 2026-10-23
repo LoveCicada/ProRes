@@ -24,6 +24,7 @@ private:
     void openFileDialog();
     void openFolderDialog();
     void showInfo();
+    void showSettings();
     void onTick();
     void play();
     void pause();

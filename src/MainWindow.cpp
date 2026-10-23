@@ -5,6 +5,7 @@
 #include "VideoWidget.h"
 
 #include <QCloseEvent>
+#include <QComboBox>
 #include <QDialog>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -17,11 +18,17 @@
 #include <QMimeData>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSettings>
 #include <QSlider>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QDir>
 #include <QUrl>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <dxgi.h>
 
 namespace {
 
@@ -81,6 +88,7 @@ MainWindow::MainWindow(QWidget* parent)
     add(QString::fromUtf8("\xE6\x89\x93\xE5\xBC\x80\xE6\x96\x87\xE4\xBB\xB6"), &MainWindow::openFileDialog);
     add(QString::fromUtf8("\xE6\x89\x93\xE5\xBC\x80\xE6\x96\x87\xE4\xBB\xB6\xE5\xA4\xB9"), &MainWindow::openFolderDialog);
     add(QString::fromUtf8("\xE6\x96\x87\xE4\xBB\xB6\xE4\xBF\xA1\xE6\x81\xAF"), &MainWindow::showInfo);
+    add(QString::fromUtf8("\xE8\xAE\xBE\xE7\xBD\xAE"), &MainWindow::showSettings);
     buttons->addStretch(1);
     add(QString::fromUtf8("\xE5\xBF\xAB\xE9\x80\x80"), &MainWindow::seekBack);
     add(QString::fromUtf8("\xE6\x92\xAD\xE6\x94\xBE"), &MainWindow::play, "play");
@@ -102,6 +110,11 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(root);
 
     m_player = new Player(this);
+    {
+        QSettings settings;
+        m_player->setGpu(settings.value(QStringLiteral("gpuIndex"), -1).toInt(),
+                         settings.value(QStringLiteral("gpuName")).toString());
+    }
     connect(m_player, &Player::statusChanged, m_status, &QLabel::setText);
     connect(m_player, &Player::timingChanged, this, [this](qint64 pos, qint64 dur) {
         m_time->setText(formatTime(pos) + QStringLiteral(" / ") + formatTime(dur));
@@ -111,9 +124,23 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(m_slider, &QSlider::sliderPressed, this, [this] { m_scrubbing = true; });
+    connect(m_slider, &QSlider::sliderMoved, this, [this](int value) {
+        m_scrubbing = true;
+        m_time->setText(formatTime(value) + QStringLiteral(" / ") + formatTime(m_slider->maximum()));
+    });
     connect(m_slider, &QSlider::sliderReleased, this, [this] {
         m_scrubbing = false;
         m_player->seekSeconds(m_slider->value() / 1000.0);
+    });
+    connect(m_slider, &QSlider::actionTriggered, this, [this](int action) {
+        if (action == QAbstractSlider::SliderMove)
+            return;
+        QTimer::singleShot(0, this, [this] {
+            if (m_slider->isSliderDown())
+                return;
+            m_scrubbing = false;
+            m_player->seekSeconds(m_slider->value() / 1000.0);
+        });
     });
 
     m_timer = new QTimer(this);
@@ -221,6 +248,52 @@ void MainWindow::showInfo()
     text->setPlainText(MediaProbe::inform(m_player->filePath()));
     box->addWidget(text);
     dialog.exec();
+}
+
+void MainWindow::showSettings()
+{
+    QSettings settings;
+    const int saved = settings.value(QStringLiteral("gpuIndex"), -1).toInt();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QString::fromUtf8("\xE8\xAE\xBE\xE7\xBD\xAE"));
+    dialog.setMinimumWidth(460);
+    auto* box = new QVBoxLayout(&dialog);
+    auto* label = new QLabel(QString::fromUtf8("\xE6\x98\xBE\xE5\x8D\xA1"), &dialog);
+    auto* combo = new QComboBox(&dialog);
+    combo->addItem(QString::fromUtf8("\xE8\x87\xAA\xE5\x8A\xA8"), -1);
+
+    IDXGIFactory1* factory = nullptr;
+    if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), reinterpret_cast<void**>(&factory)))) {
+        IDXGIAdapter1* adapter = nullptr;
+        for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+            DXGI_ADAPTER_DESC1 desc = {};
+            if (SUCCEEDED(adapter->GetDesc1(&desc))) {
+                const QString name = QString::fromWCharArray(desc.Description);
+                combo->addItem(QString::number(i) + QStringLiteral(": ") + name, static_cast<int>(i));
+            }
+            adapter->Release();
+        }
+        factory->Release();
+    }
+
+    const int row = combo->findData(saved);
+    combo->setCurrentIndex(row >= 0 ? row : 0);
+    auto* ok = new QPushButton(QString::fromUtf8("\xE7\xA1\xAE\xE5\xAE\x9A"), &dialog);
+    connect(ok, &QPushButton::clicked, &dialog, &QDialog::accept);
+    box->addWidget(label);
+    box->addWidget(combo);
+    box->addWidget(ok, 0, Qt::AlignRight);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    const int gpu = combo->currentData().toInt();
+    const QString gpuName = gpu < 0 ? QString() : combo->currentText();
+    settings.setValue(QStringLiteral("gpuIndex"), gpu);
+    settings.setValue(QStringLiteral("gpuName"), gpuName);
+    m_player->setGpu(gpu, gpuName);
+    if (!m_player->filePath().isEmpty())
+        openPath(m_player->filePath());
 }
 
 void MainWindow::onTick()

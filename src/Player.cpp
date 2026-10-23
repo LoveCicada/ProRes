@@ -10,6 +10,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 
 extern "C" {
@@ -58,6 +59,8 @@ struct Player::Engine {
     std::atomic<bool> running { false };
     std::atomic<bool> seekPending { false };
     std::atomic<bool> loop { false };
+    std::atomic<int> gpuIndex { -1 };
+    QString gpuName;
     std::mutex waitMutex;
     std::condition_variable waitCv;
 
@@ -277,6 +280,12 @@ void Player::seekSeconds(double seconds)
     m->eof = false;
     m->pause = false;
     m->position = seconds;
+    m->audioBaseValid = false;
+    m->wallOrigin = seconds;
+    m->wallAccum = 0.0;
+    m->wallStart = std::chrono::steady_clock::now();
+    m->wallRunning = true;
+    m->clearQueues();
     m->waitCv.notify_all();
     m->videoCv.notify_all();
     m->pcmCv.notify_all();
@@ -295,9 +304,18 @@ void Player::setLoop(bool on)
     m->pcmCv.notify_all();
 }
 
+void Player::setGpu(int index, const QString& name)
+{
+    m->gpuIndex = index;
+    std::lock_guard<std::mutex> lock(m->statusMutex);
+    m->gpuName = name;
+}
+
 bool Player::takeFrameForClock(VideoFrame& out)
 {
     if (!m->running.load())
+        return false;
+    if (m->seekPending.load())
         return false;
 
     const int finished = m->seekFinished.load();
@@ -382,7 +400,7 @@ bool Player::takeFrameForClock(VideoFrame& out)
         std::lock_guard<std::mutex> lock(m->videoMutex);
         if (!m->video.empty()) {
             const double oldest = m->video.front().pts;
-            stalled = oldest > clock + 0.3 || m->video.size() >= kMaxFrames;
+            stalled = oldest > clock + 0.3;
             if (stalled) {
                 while (m->video.size() > 1)
                     m->video.pop_front();
@@ -467,7 +485,10 @@ void Player::decodeLoop(const QString& path)
         }
         bool hwOn = false;
         if (tryVulkan && stream->codecpar->codec_id == AV_CODEC_ID_PRORES) {
-            if (av_hwdevice_ctx_create(hw, AV_HWDEVICE_TYPE_VULKAN, nullptr, nullptr, 0) == 0) {
+            const int gpu = m->gpuIndex.load();
+            const std::string deviceName = gpu >= 0 ? std::to_string(gpu) : std::string();
+            const char* device = deviceName.empty() ? nullptr : deviceName.c_str();
+            if (av_hwdevice_ctx_create(hw, AV_HWDEVICE_TYPE_VULKAN, device, nullptr, 0) == 0) {
                 ctx->hw_device_ctx = av_buffer_ref(*hw);
                 ctx->get_format = getVulkanFormat;
                 hwOn = true;
@@ -500,7 +521,19 @@ void Player::decodeLoop(const QString& path)
         fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
         return;
     }
-    m->setStatus(hwDevice ? QString::fromUtf8("\xE7\xA1\xAC\xE8\xA7\xA3\x20\x56\x75\x6C\x6B\x61\x6E") : QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3"));
+    QString mode = hwDevice
+        ? QString::fromUtf8("\xE7\xA1\xAC\xE8\xA7\xA3\x20\x56\x75\x6C\x6B\x61\x6E")
+        : QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3");
+    if (hwDevice && m->gpuIndex.load() >= 0) {
+        QString gpuName;
+        {
+            std::lock_guard<std::mutex> lock(m->statusMutex);
+            gpuName = m->gpuName;
+        }
+        if (!gpuName.isEmpty())
+            mode += QStringLiteral(" · ") + gpuName;
+    }
+    m->setStatus(mode);
 
     AVCodecContext* audioCtx = nullptr;
     AVBufferRef* unusedHw = nullptr;

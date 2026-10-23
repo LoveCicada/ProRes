@@ -13,5 +13,7 @@
 - [x] 文件信息窗口可拉大、可最大化，正文 16px，普通 MediaInfo 报告
 - [x] 画面队列被时钟卡住时继续出画，暂停能唤醒解码线程，Present 不堵住界面
 - [x] 循环播放按钮
+- [x] 进度条拖动和点击都会 Seek，不再因为队列满了冲到结尾
+- [x] 设置窗口可选择显卡，选择会记住并交给 Vulkan
 
 Release 可执行文件：`build/Release/ProResPlayer.exe`。

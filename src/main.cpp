@@ -5,6 +5,7 @@
 int main(int argc, char* argv[])
 {
     QApplication app(argc, argv);
+    QApplication::setOrganizationName(QStringLiteral("ProResPlayer"));
     QApplication::setApplicationName(QString::fromUtf8("\x50\x72\x6F\x52\x65\x73\x20\xE6\x92\xAD\xE6\x94\xBE\xE5\x99\xA8"));
     app.setStyleSheet(QStringLiteral(
         "QWidget { background: #14110e; color: #f4ecdf; "
@@ -15,6 +16,10 @@ int main(int argc, char* argv[])
         "QPushButton:pressed { background: #e0a106; color: #1a140e; }"
         "QPushButton#play { background: #e0a106; color: #1a140e; }"
         "QPushButton#loop:checked { background: #e0a106; color: #1a140e; }"
+        "QComboBox { background: #2a241c; color: #f4ecdf; border: none; "
+        "border-radius: 8px; padding: 6px 10px; min-height: 28px; }"
+        "QComboBox QAbstractItemView { background: #1c1914; color: #f4ecdf; "
+        "selection-background-color: #e0a106; selection-color: #1a140e; }"
         "QLabel#title { font-size: 20px; }"
         "QLabel#status, QLabel#time { color: #c9bba6; }"
         "QSlider::groove:horizontal { height: 6px; background: #3a3228; border-radius: 3px; }"

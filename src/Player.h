@@ -26,6 +26,7 @@ public:
     void seekSeconds(double seconds);
     void seekRelative(double deltaSeconds);
     void setLoop(bool on);
+    void setGpu(int index, const QString& name);
 
     bool takeFrameForClock(VideoFrame& out);
     qint64 positionMs() const;
