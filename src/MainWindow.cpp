@@ -16,10 +16,13 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
 #include <QSlider>
+#include <QStyle>
+#include <QStyleOptionSlider>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QDir>
@@ -50,6 +53,65 @@ QString formatTime(qint64 ms)
         .arg(s % 60, 2, 10, QLatin1Char('0'));
 }
 
+class SeekSlider : public QSlider {
+public:
+    explicit SeekSlider(QWidget* parent = nullptr)
+        : QSlider(Qt::Horizontal, parent)
+    {
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            QSlider::mousePressEvent(event);
+            return;
+        }
+        setSliderDown(true);
+        setValue(valueFromPos(event->pos()));
+        emit sliderPressed();
+        emit sliderMoved(value());
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (!isSliderDown()) {
+            QSlider::mouseMoveEvent(event);
+            return;
+        }
+        setValue(valueFromPos(event->pos()));
+        emit sliderMoved(value());
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (!isSliderDown() || event->button() != Qt::LeftButton) {
+            QSlider::mouseReleaseEvent(event);
+            return;
+        }
+        setValue(valueFromPos(event->pos()));
+        setSliderDown(false);
+        emit sliderReleased();
+        event->accept();
+    }
+
+private:
+    int valueFromPos(const QPoint& pos) const
+    {
+        QStyleOptionSlider opt;
+        initStyleOption(&opt);
+        const QRect groove = style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderGroove, this);
+        const QRect handle = style()->subControlRect(QStyle::CC_Slider, &opt, QStyle::SC_SliderHandle, this);
+        const int span = groove.width() - handle.width();
+        if (!groove.isValid() || span <= 0)
+            return value();
+        const int x = qBound(0, pos.x() - groove.x() - handle.width() / 2, span);
+        return QStyle::sliderValueFromPosition(minimum(), maximum(), x, span, opt.upsideDown);
+    }
+};
+
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
@@ -71,7 +133,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     m_video = new VideoWidget(root);
 
-    m_slider = new QSlider(Qt::Horizontal, root);
+    m_slider = new SeekSlider(root);
     m_slider->setRange(0, 0);
     m_time = new QLabel(QStringLiteral("00:00 / 00:00"), root);
     m_time->setObjectName(QStringLiteral("time"));
@@ -119,8 +181,12 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_player, &Player::timingChanged, this, [this](qint64 pos, qint64 dur) {
         m_time->setText(formatTime(pos) + QStringLiteral(" / ") + formatTime(dur));
         if (!m_scrubbing) {
-            m_slider->setRange(0, static_cast<int>(qMax<qint64>(0, dur)));
+            const int maximum = static_cast<int>(qMax<qint64>(0, dur));
+            m_updatingSlider = true;
+            m_slider->setRange(0, maximum);
+            m_slider->setPageStep(qMax(1000, maximum / 20));
             m_slider->setValue(static_cast<int>(qMax<qint64>(0, pos)));
+            m_updatingSlider = false;
         }
     });
     connect(m_slider, &QSlider::sliderPressed, this, [this] { m_scrubbing = true; });
@@ -132,15 +198,11 @@ MainWindow::MainWindow(QWidget* parent)
         m_scrubbing = false;
         m_player->seekSeconds(m_slider->value() / 1000.0);
     });
-    connect(m_slider, &QSlider::actionTriggered, this, [this](int action) {
-        if (action == QAbstractSlider::SliderMove)
+    connect(m_slider, &QSlider::valueChanged, this, [this](int value) {
+        if (m_updatingSlider || m_slider->isSliderDown())
             return;
-        QTimer::singleShot(0, this, [this] {
-            if (m_slider->isSliderDown())
-                return;
-            m_scrubbing = false;
-            m_player->seekSeconds(m_slider->value() / 1000.0);
-        });
+        m_time->setText(formatTime(value) + QStringLiteral(" / ") + formatTime(m_slider->maximum()));
+        m_player->seekSeconds(value / 1000.0);
     });
 
     m_timer = new QTimer(this);

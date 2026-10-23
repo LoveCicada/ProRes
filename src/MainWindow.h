@@ -41,4 +41,5 @@ private:
     QSlider* m_slider = nullptr;
     QTimer* m_timer = nullptr;
     bool m_scrubbing = false;
+    bool m_updatingSlider = false;
 };

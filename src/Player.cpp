@@ -68,6 +68,7 @@ struct Player::Engine {
     double seekSec = 0.0;
     int seekId = 0;
     std::atomic<int> seekFinished { 0 };
+    std::atomic<double> dropUntil { -1.0 };
 
     std::mutex videoMutex;
     std::condition_variable videoCv;
@@ -280,6 +281,7 @@ void Player::seekSeconds(double seconds)
     m->eof = false;
     m->pause = false;
     m->position = seconds;
+    m->dropUntil = seconds;
     m->audioBaseValid = false;
     m->wallOrigin = seconds;
     m->wallAccum = 0.0;
@@ -402,8 +404,6 @@ bool Player::takeFrameForClock(VideoFrame& out)
             const double oldest = m->video.front().pts;
             stalled = oldest > clock + 0.3;
             if (stalled) {
-                while (m->video.size() > 1)
-                    m->video.pop_front();
                 out = std::move(m->video.front());
                 m->video.pop_front();
                 got = true;
@@ -557,24 +557,65 @@ void Player::decodeLoop(const QString& path)
     AVFrame* swFrame = av_frame_alloc();
 
     auto performSeek = [&] {
-        double sec = 0.0;
-        int id = 0;
-        {
-            std::lock_guard<std::mutex> lock(m->seekMutex);
-            sec = m->seekSec;
-            id = m->seekId;
+        for (;;) {
+            if (m->stop.load())
+                return;
+            double sec = 0.0;
+            int id = 0;
+            {
+                std::lock_guard<std::mutex> lock(m->seekMutex);
+                sec = m->seekSec;
+                id = m->seekId;
+            }
+            AVStream* stream = format->streams[videoIndex];
+            const int64_t target = av_rescale_q(static_cast<int64_t>(sec * AV_TIME_BASE),
+                                                AV_TIME_BASE_Q, stream->time_base);
+            const int ret = avformat_seek_file(format, videoIndex, INT64_MIN, target, target,
+                                               AVSEEK_FLAG_BACKWARD);
+            if (ret < 0) {
+                int latest = 0;
+                {
+                    std::lock_guard<std::mutex> lock(m->seekMutex);
+                    latest = m->seekId;
+                }
+                if (latest != id)
+                    continue;
+                const QString text = QString::fromUtf8("\xE8\xB7\xB3\xE8\xBD\xAC\xE5\xA4\xB1\xE8\xB4\xA5");
+                m->setStatus(text);
+                QMetaObject::invokeMethod(this, [this, text] {
+                    m->shownStatus = text;
+                    emit statusChanged(text);
+                }, Qt::QueuedConnection);
+                std::unique_lock<std::mutex> lock(m->waitMutex);
+                m->waitCv.wait(lock, [&] {
+                    if (m->stop.load())
+                        return true;
+                    std::lock_guard<std::mutex> seekLock(m->seekMutex);
+                    return m->seekId != id;
+                });
+                if (m->stop.load())
+                    return;
+                continue;
+            }
+            avcodec_flush_buffers(videoCtx);
+            if (audioCtx)
+                avcodec_flush_buffers(audioCtx);
+            m->clearQueues();
+            m->eof = false;
+            m->dropUntil = sec;
+            nextVideoPts = sec;
+            nextAudioPts = sec;
+            int latest = 0;
+            {
+                std::lock_guard<std::mutex> lock(m->seekMutex);
+                latest = m->seekId;
+            }
+            if (latest != id)
+                continue;
+            m->seekPending = false;
+            m->seekFinished = id;
+            return;
         }
-        const int64_t ts = static_cast<int64_t>(sec * AV_TIME_BASE);
-        av_seek_frame(format, -1, ts, AVSEEK_FLAG_BACKWARD);
-        avcodec_flush_buffers(videoCtx);
-        if (audioCtx)
-            avcodec_flush_buffers(audioCtx);
-        m->clearQueues();
-        m->eof = false;
-        m->seekPending = false;
-        m->seekFinished = id;
-        nextVideoPts = sec;
-        nextAudioPts = sec;
     };
 
     auto handleVideo = [&](AVFrame* src) {
@@ -607,6 +648,13 @@ void Player::decodeLoop(const QString& path)
                                     : src->pts,
                                 format->streams[videoIndex]->time_base, nextVideoPts);
         nextVideoPts = out.pts + 0.03;
+        const double until = m->dropUntil.load();
+        if (until >= 0.0 && out.pts + 0.05 < until) {
+            av_frame_unref(swFrame);
+            return;
+        }
+        if (until >= 0.0)
+            m->dropUntil = -1.0;
         out.bgra.resize(static_cast<size_t>(out.width) * out.height * 4);
         uint8_t* dstData[1] = { out.bgra.data() };
         int dstStride[1] = { out.width * 4 };
