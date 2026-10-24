@@ -1,4 +1,5 @@
 #include "Player.h"
+#include "VulkanCopy.h"
 
 #include <QAudioFormat>
 #include <QAudioOutput>
@@ -182,13 +183,39 @@ int vulkanDeviceIndex(qint64 luidHigh, quint32 luidLow)
     return found;
 }
 
-bool probeHardwareDecode(const char* path, int vulkanIndex)
+bool proresFamily(AVCodecID id)
 {
-    if (!path || vulkanIndex < 0)
-        return false;
+    return id == AV_CODEC_ID_PRORES || id == AV_CODEC_ID_PRORES_RAW;
+}
+
+DecodePath choosePath(int mask)
+{
+    if (mask & kPathZeroCopy)
+        return DecodePath::VulkanZeroCopy;
+    if (mask & kPathReadback)
+        return DecodePath::VulkanReadback;
+    return DecodePath::Software;
+}
+
+QString modeText(DecodePath path, const QString& gpu)
+{
+    QString text = QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3");
+    if (path == DecodePath::VulkanReadback)
+        text = QString::fromUtf8("Vulkan \xE5\x9B\x9E\xE8\xAF\xBB");
+    else if (path == DecodePath::VulkanZeroCopy)
+        text = QString::fromUtf8("Vulkan \xE9\x9B\xB6\xE6\x8B\xB7\xE8\xB4\x9D");
+    if (path != DecodePath::Software && !gpu.isEmpty())
+        text += QStringLiteral(" · ") + gpu;
+    return text;
+}
+
+int probeDecodeMask(const char* path, int vulkanIndex, qint64 luidHigh, quint32 luidLow)
+{
+    if (!path)
+        return 0;
     const int previous = av_log_get_level();
     av_log_set_level(AV_LOG_FATAL);
-    bool supported = false;
+    int mask = 0;
 
     AVFormatContext* format = nullptr;
     AVCodecContext* ctx = nullptr;
@@ -202,13 +229,18 @@ bool probeHardwareDecode(const char* path, int vulkanIndex)
     const int videoIndex = opened
         ? av_find_best_stream(format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0)
         : -1;
-    const bool prores = videoIndex >= 0
-        && format->streams[videoIndex]->codecpar->codec_id == AV_CODEC_ID_PRORES;
-    const std::string deviceName = std::to_string(vulkanIndex);
-    const bool deviceOk = prores
-        && av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_VULKAN, deviceName.c_str(), nullptr, 0) >= 0;
-    const AVCodec* codec = deviceOk ? avcodec_find_decoder(AV_CODEC_ID_PRORES) : nullptr;
+    const AVCodecID codecId = videoIndex >= 0
+        ? format->streams[videoIndex]->codecpar->codec_id
+        : AV_CODEC_ID_NONE;
+    const AVCodec* codec = videoIndex >= 0 ? avcodec_find_decoder(codecId) : nullptr;
     if (codec)
+        mask |= kPathSoftware;
+
+    const bool wantVulkan = codec && proresFamily(codecId) && vulkanIndex >= 0;
+    const std::string deviceName = std::to_string(vulkanIndex);
+    const bool deviceOk = wantVulkan
+        && av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_VULKAN, deviceName.c_str(), nullptr, 0) >= 0;
+    if (deviceOk)
         ctx = avcodec_alloc_context3(codec);
     const bool paramsOk = ctx && avcodec_parameters_to_context(ctx, format->streams[videoIndex]->codecpar) >= 0;
     if (paramsOk) {
@@ -216,6 +248,7 @@ bool probeHardwareDecode(const char* path, int vulkanIndex)
         ctx->opaque = &choice;
         ctx->get_format = probeGetFormat;
     }
+    bool vulkanFrame = false;
     if (paramsOk && avcodec_open2(ctx, codec, nullptr) >= 0) {
         packet = av_packet_alloc();
         frame = av_frame_alloc();
@@ -230,13 +263,19 @@ bool probeHardwareDecode(const char* path, int vulkanIndex)
                 break;
             const int received = avcodec_receive_frame(ctx, frame);
             if (received == 0) {
-                supported = frame->format == AV_PIX_FMT_VULKAN;
+                vulkanFrame = frame->format == AV_PIX_FMT_VULKAN;
                 av_frame_unref(frame);
                 break;
             }
             if (received != AVERROR(EAGAIN))
                 break;
         }
+    }
+    if (vulkanFrame) {
+        mask |= kPathReadback;
+        VulkanCopy copy;
+        if (copy.init(hw, luidHigh, luidLow) && copy.canImportSharedTexture())
+            mask |= kPathZeroCopy;
     }
 
     av_frame_free(&frame);
@@ -245,7 +284,7 @@ bool probeHardwareDecode(const char* path, int vulkanIndex)
     av_buffer_unref(&hw);
     avformat_close_input(&format);
     av_log_set_level(previous);
-    return supported;
+    return mask;
 }
 
 } // namespace
@@ -262,6 +301,10 @@ struct Player::Engine {
     std::atomic<qint64> luidHigh { 0 };
     std::atomic<quint32> luidLow { 0 };
     QString gpuName;
+    std::atomic<int> requestedPath { static_cast<int>(DecodePath::Software) };
+    std::atomic<int> activePath { static_cast<int>(DecodePath::Software) };
+    std::atomic<int> pathMask { kPathSoftware };
+    std::atomic<bool> reopenDecoder { false };
     std::mutex waitMutex;
     std::condition_variable waitCv;
 
@@ -515,6 +558,43 @@ void Player::setGpu(const GpuAdapter& adapter)
     m->gpuName = adapter.name;
 }
 
+int Player::decodePath() const
+{
+    return m->activePath.load();
+}
+
+void Player::setDecodePath(int path)
+{
+    if ((m->pathMask.load() & (1 << path)) == 0)
+        return;
+    if (path == m->requestedPath.load())
+        return;
+    m->requestedPath = path;
+    if (!m->running.load())
+        return;
+    const double seconds = std::max(0.0, m->position.load());
+    {
+        std::lock_guard<std::mutex> lock(m->seekMutex);
+        m->seekSec = seconds;
+        ++m->seekId;
+    }
+    m->reopenDecoder = true;
+    m->seekPending = true;
+    m->eof = false;
+    m->pause = false;
+    m->position = seconds;
+    m->dropUntil = seconds;
+    m->audioBaseValid = false;
+    m->wallOrigin = seconds;
+    m->wallAccum = 0.0;
+    m->wallStart = std::chrono::steady_clock::now();
+    m->wallRunning = true;
+    m->clearQueues();
+    m->waitCv.notify_all();
+    m->videoCv.notify_all();
+    m->pcmCv.notify_all();
+}
+
 bool Player::takeFrameForClock(VideoFrame& out)
 {
     if (!m->running.load())
@@ -673,10 +753,21 @@ void Player::decodeLoop(const QString& path)
         return;
     }
 
-    const bool prores = format->streams[videoIndex]->codecpar->codec_id == AV_CODEC_ID_PRORES;
-    const int vulkanIndex = prores ? vulkanDeviceIndex(m->luidHigh.load(), m->luidLow.load()) : -1;
+    const AVCodecID videoCodec = format->streams[videoIndex]->codecpar->codec_id;
+    const int vulkanIndex = proresFamily(videoCodec)
+        ? vulkanDeviceIndex(m->luidHigh.load(), m->luidLow.load())
+        : -1;
     const QByteArray pathUtf8 = path.toUtf8();
-    const bool useHardware = vulkanIndex >= 0 && probeHardwareDecode(pathUtf8.constData(), vulkanIndex);
+    const int mask = probeDecodeMask(pathUtf8.constData(), vulkanIndex, m->luidHigh.load(), m->luidLow.load());
+    if (mask == 0) {
+        avformat_close_input(&format);
+        fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
+        return;
+    }
+    m->pathMask = mask;
+    DecodePath chosen = choosePath(mask);
+    m->requestedPath = static_cast<int>(chosen);
+    m->activePath = static_cast<int>(chosen);
 
     auto openDecoder = [&](int index, bool tryVulkan, AVCodecContext** out, AVBufferRef** hw) {
         *out = nullptr;
@@ -720,28 +811,51 @@ void Player::decodeLoop(const QString& path)
 
     AVCodecContext* videoCtx = nullptr;
     AVBufferRef* hwDevice = nullptr;
-    if (!openDecoder(videoIndex, useHardware, &videoCtx, &hwDevice)) {
-        avformat_close_input(&format);
-        fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
-        return;
-    }
-    QString mode = hwDevice
-        ? QString::fromUtf8("\xE7\xA1\xAC\xE8\xA7\xA3\x20\x56\x75\x6C\x6B\x61\x6E")
-        : QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3");
-    if (hwDevice) {
+    std::unique_ptr<VulkanCopy> zeroCopy;
+    auto publish = [&](DecodePath selected) {
         QString gpuName;
         {
             std::lock_guard<std::mutex> lock(m->statusMutex);
             gpuName = m->gpuName;
         }
-        if (!gpuName.isEmpty())
-            mode += QStringLiteral(" · ") + gpuName;
+        const QString mode = modeText(selected, gpuName);
+        m->activePath = static_cast<int>(selected);
+        m->setStatus(mode);
+        QMetaObject::invokeMethod(this, [this, mode, selected] {
+            m->shownStatus = mode;
+            emit statusChanged(mode);
+            emit decodeOptionsChanged(m->pathMask.load(), static_cast<int>(selected));
+        }, Qt::QueuedConnection);
+    };
+    auto openVideo = [&](DecodePath selected) {
+        zeroCopy.reset();
+        avcodec_free_context(&videoCtx);
+        av_buffer_unref(&hwDevice);
+        const bool wantVulkan = selected != DecodePath::Software;
+        if (!openDecoder(videoIndex, wantVulkan && vulkanIndex >= 0, &videoCtx, &hwDevice))
+            return false;
+        if (selected != DecodePath::Software && !hwDevice) {
+            selected = DecodePath::Software;
+            m->requestedPath = static_cast<int>(selected);
+        }
+        if (selected == DecodePath::VulkanZeroCopy) {
+            zeroCopy = std::make_unique<VulkanCopy>();
+            if (!zeroCopy->init(hwDevice, m->luidHigh.load(), m->luidLow.load())) {
+                zeroCopy.reset();
+                selected = DecodePath::VulkanReadback;
+                m->requestedPath = static_cast<int>(selected);
+                m->pathMask = m->pathMask.load() & ~kPathZeroCopy;
+            }
+        }
+        chosen = selected;
+        publish(selected);
+        return true;
+    };
+    if (!openVideo(chosen)) {
+        avformat_close_input(&format);
+        fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
+        return;
     }
-    m->setStatus(mode);
-    QMetaObject::invokeMethod(this, [this, mode] {
-        m->shownStatus = mode;
-        emit statusChanged(mode);
-    }, Qt::QueuedConnection);
 
     AVCodecContext* audioCtx = nullptr;
     AVBufferRef* unusedHw = nullptr;
@@ -827,6 +941,44 @@ void Player::decodeLoop(const QString& path)
     };
 
     auto handleVideo = [&](AVFrame* src) {
+        const auto stopCopy = [&] {
+            return m->stop.load() || m->seekPending.load() || m->pause.load();
+        };
+        if (chosen == DecodePath::VulkanZeroCopy && zeroCopy && src->format == AV_PIX_FMT_VULKAN) {
+            const VulkanCopyResult copied = zeroCopy->copy(src, stopCopy);
+            if (copied.interrupted)
+                return;
+            if (copied.ok) {
+                const AVPixFmtDescriptor* hwDesc = nullptr;
+                if (src->hw_frames_ctx && src->hw_frames_ctx->data) {
+                    auto* frames = reinterpret_cast<AVHWFramesContext*>(src->hw_frames_ctx->data);
+                    hwDesc = av_pix_fmt_desc_get(frames->sw_format);
+                }
+                VideoFrame out;
+                out.width = src->width;
+                out.height = src->height;
+                out.alpha = hwDesc && (hwDesc->flags & AV_PIX_FMT_FLAG_ALPHA);
+                out.zeroCopy = true;
+                out.sharedHandle = reinterpret_cast<quintptr>(copied.handle);
+                out.slot = copied.slot;
+                out.pts = stampSeconds(src->best_effort_timestamp != AV_NOPTS_VALUE
+                                            ? src->best_effort_timestamp
+                                            : src->pts,
+                                        format->streams[videoIndex]->time_base, nextVideoPts);
+                nextVideoPts = out.pts + 0.03;
+                const double until = m->dropUntil.load();
+                if (until >= 0.0 && out.pts + 0.05 < until)
+                    return;
+                if (until >= 0.0)
+                    m->dropUntil = -1.0;
+                m->pushVideo(std::move(out));
+                return;
+            }
+            chosen = DecodePath::VulkanReadback;
+            m->requestedPath = static_cast<int>(chosen);
+            m->pathMask = m->pathMask.load() & ~kPathZeroCopy;
+            publish(chosen);
+        }
         AVFrame* used = src;
         if (src->format == AV_PIX_FMT_VULKAN) {
             if (av_hwframe_transfer_data(swFrame, src, 0) < 0)
@@ -930,6 +1082,13 @@ void Player::decodeLoop(const QString& path)
             continue;
         }
         if (m->seekPending.load()) {
+            if (m->reopenDecoder.exchange(false)) {
+                const DecodePath next = static_cast<DecodePath>(m->requestedPath.load());
+                if (!openVideo(next)) {
+                    fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
+                    break;
+                }
+            }
             performSeek();
             continue;
         }
@@ -981,6 +1140,7 @@ void Player::decodeLoop(const QString& path)
     av_packet_free(&packet);
     sws_freeContext(scaler);
     swr_free(&resampler);
+    zeroCopy.reset();
     avcodec_free_context(&videoCtx);
     avcodec_free_context(&audioCtx);
     av_buffer_unref(&hwDevice);

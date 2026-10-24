@@ -3,6 +3,7 @@
 #include <QMainWindow>
 
 class Player;
+class QComboBox;
 class QLabel;
 class QSlider;
 class QTimer;
@@ -38,6 +39,8 @@ private:
     QLabel* m_title = nullptr;
     QLabel* m_status = nullptr;
     QLabel* m_time = nullptr;
+    QComboBox* m_decode = nullptr;
+    bool m_updatingDecode = false;
     QSlider* m_slider = nullptr;
     QTimer* m_timer = nullptr;
     bool m_scrubbing = false;

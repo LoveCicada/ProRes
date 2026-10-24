@@ -13,6 +13,7 @@ public:
 
     void present(const VideoFrame& frame);
     void clear();
+    void releaseShared();
     void setAdapter(qint64 luidHigh, quint32 luidLow);
 
 protected:

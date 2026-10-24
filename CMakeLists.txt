@@ -31,6 +31,8 @@ add_executable(ProResPlayer
     src/VideoWidget.h
     src/Player.cpp
     src/Player.h
+    src/VulkanCopy.cpp
+    src/VulkanCopy.h
     src/MediaProbe.cpp
     src/MediaProbe.h
 )

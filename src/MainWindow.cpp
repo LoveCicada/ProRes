@@ -202,6 +202,10 @@ MainWindow::MainWindow(QWidget* parent)
     add(QString::fromUtf8("\xE6\x89\x93\xE5\xBC\x80\xE6\x96\x87\xE4\xBB\xB6\xE5\xA4\xB9"), &MainWindow::openFolderDialog);
     add(QString::fromUtf8("\xE6\x96\x87\xE4\xBB\xB6\xE4\xBF\xA1\xE6\x81\xAF"), &MainWindow::showInfo);
     add(QString::fromUtf8("\xE8\xAE\xBE\xE7\xBD\xAE"), &MainWindow::showSettings);
+    m_decode = new QComboBox(root);
+    m_decode->setObjectName(QStringLiteral("decode"));
+    m_decode->setEnabled(false);
+    buttons->addWidget(m_decode);
     buttons->addStretch(1);
     add(QString::fromUtf8("\xE5\xBF\xAB\xE9\x80\x80"), &MainWindow::seekBack);
     add(QString::fromUtf8("\xE6\x92\xAD\xE6\x94\xBE"), &MainWindow::play, "play");
@@ -227,6 +231,26 @@ MainWindow::MainWindow(QWidget* parent)
     m_player->setGpu(startupGpu);
     m_video->setAdapter(startupGpu.luidHigh, startupGpu.luidLow);
     connect(m_player, &Player::statusChanged, m_status, &QLabel::setText);
+    connect(m_player, &Player::decodeOptionsChanged, this, [this](int mask, int path) {
+        m_updatingDecode = true;
+        m_decode->clear();
+        if (mask & kPathSoftware)
+            m_decode->addItem(QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3"), static_cast<int>(DecodePath::Software));
+        if (mask & kPathReadback)
+            m_decode->addItem(QString::fromUtf8("Vulkan \xE5\x9B\x9E\xE8\xAF\xBB"), static_cast<int>(DecodePath::VulkanReadback));
+        if (mask & kPathZeroCopy)
+            m_decode->addItem(QString::fromUtf8("Vulkan \xE9\x9B\xB6\xE6\x8B\xB7\xE8\xB4\x9D"), static_cast<int>(DecodePath::VulkanZeroCopy));
+        const int row = m_decode->findData(path);
+        if (row >= 0)
+            m_decode->setCurrentIndex(row);
+        m_decode->setEnabled(m_decode->count() > 1);
+        m_updatingDecode = false;
+    });
+    connect(m_decode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
+        if (m_updatingDecode || m_decode->currentIndex() < 0)
+            return;
+        m_player->setDecodePath(m_decode->currentData().toInt());
+    });
     connect(m_player, &Player::timingChanged, this, [this](qint64 pos, qint64 dur) {
         m_time->setText(formatTime(pos) + QStringLiteral(" / ") + formatTime(dur));
         if (!m_scrubbing) {
@@ -297,6 +321,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
 
 void MainWindow::openPath(const QString& path)
 {
+    m_video->releaseShared();
     m_title->setText(QFileInfo(path).fileName());
     m_player->open(path);
 }
@@ -443,6 +468,7 @@ void MainWindow::pause()
 void MainWindow::stopPlayback()
 {
     m_player->stop();
+    m_video->releaseShared();
     m_video->clear();
 }
 

@@ -7,11 +7,14 @@
 #include <QShowEvent>
 
 #include <cstring>
+#include <memory>
+#include <vector>
 
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
 #include <d3d11.h>
+#include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 
@@ -64,6 +67,14 @@ struct VideoWidget::Impl {
     ComPtr<ID3D11SamplerState> sampler;
     int texW = 0;
     int texH = 0;
+    struct SharedView {
+        quintptr handle = 0;
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> srv;
+    };
+    std::vector<SharedView> shared;
+    std::shared_ptr<void> held[2];
+    int hold = 0;
     bool ready = false;
     bool hasLuid = false;
     qint64 luidHigh = 0;
@@ -123,6 +134,9 @@ void VideoWidget::releaseDevice()
     d->target.Reset();
     d->srv.Reset();
     d->texture.Reset();
+    d->shared.clear();
+    d->held[0].reset();
+    d->held[1].reset();
     d->texW = 0;
     d->texH = 0;
     d->swap.Reset();
@@ -267,13 +281,59 @@ void VideoWidget::clear()
     d->swap->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
 }
 
+void VideoWidget::releaseShared()
+{
+    if (!d)
+        return;
+    d->shared.clear();
+    d->held[0].reset();
+    d->held[1].reset();
+}
+
 void VideoWidget::present(const VideoFrame& frame)
 {
     ensureDevice();
-    if (!d->ready || frame.bgra.empty() || frame.width < 1 || frame.height < 1)
+    if (!d->ready || frame.width < 1 || frame.height < 1)
+        return;
+    if (!frame.zeroCopy && frame.bgra.empty())
         return;
 
-    if (d->texW != frame.width || d->texH != frame.height) {
+    ID3D11ShaderResourceView* source = nullptr;
+    ComPtr<ID3D11ShaderResourceView> sharedSrv;
+    if (frame.zeroCopy) {
+        d->held[d->hold] = frame.slot;
+        d->hold ^= 1;
+        Impl::SharedView* found = nullptr;
+        for (auto& item : d->shared) {
+            if (item.handle == frame.sharedHandle) {
+                found = &item;
+                break;
+            }
+        }
+        if (!found) {
+            ComPtr<ID3D11Device1> device1;
+            if (FAILED(d->device.As(&device1)))
+                return;
+            ComPtr<ID3D11Texture2D> opened;
+            if (FAILED(device1->OpenSharedResource1(reinterpret_cast<HANDLE>(frame.sharedHandle),
+                                                    IID_PPV_ARGS(opened.GetAddressOf()))))
+                return;
+            D3D11_SHADER_RESOURCE_VIEW_DESC view = {};
+            view.Format = DXGI_FORMAT_R16G16B16A16_UNORM;
+            view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+            view.Texture2D.MipLevels = 1;
+            if (FAILED(d->device->CreateShaderResourceView(opened.Get(), &view, sharedSrv.GetAddressOf())))
+                return;
+            Impl::SharedView item;
+            item.handle = frame.sharedHandle;
+            item.texture = opened;
+            item.srv = sharedSrv;
+            d->shared.push_back(item);
+            source = sharedSrv.Get();
+        } else {
+            source = found->srv.Get();
+        }
+    } else if (d->texW != frame.width || d->texH != frame.height) {
         d->srv.Reset();
         d->texture.Reset();
         D3D11_TEXTURE2D_DESC td = {};
@@ -294,14 +354,19 @@ void VideoWidget::present(const VideoFrame& frame)
         d->texH = frame.height;
     }
 
-    D3D11_MAPPED_SUBRESOURCE mapped = {};
-    if (FAILED(d->context->Map(d->texture.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+    if (!frame.zeroCopy) {
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(d->context->Map(d->texture.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped)))
+            return;
+        const int srcPitch = frame.width * 4;
+        auto* dst = static_cast<uint8_t*>(mapped.pData);
+        for (int y = 0; y < frame.height; ++y)
+            memcpy(dst + y * mapped.RowPitch, frame.bgra.data() + y * srcPitch, static_cast<size_t>(srcPitch));
+        d->context->Unmap(d->texture.Get(), 0);
+        source = d->srv.Get();
+    }
+    if (!source)
         return;
-    const int srcPitch = frame.width * 4;
-    auto* dst = static_cast<uint8_t*>(mapped.pData);
-    for (int y = 0; y < frame.height; ++y)
-        memcpy(dst + y * mapped.RowPitch, frame.bgra.data() + y * srcPitch, static_cast<size_t>(srcPitch));
-    d->context->Unmap(d->texture.Get(), 0);
 
     D3D11_MAPPED_SUBRESOURCE cb = {};
     if (SUCCEEDED(d->context->Map(d->constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &cb))) {
@@ -325,11 +390,12 @@ void VideoWidget::present(const VideoFrame& frame)
     d->context->IASetVertexBuffers(0, 1, d->vertices.GetAddressOf(), &stride, &offset);
     d->context->VSSetShader(d->vs.Get(), nullptr, 0);
     d->context->PSSetShader(d->ps.Get(), nullptr, 0);
-    d->context->PSSetShaderResources(0, 1, d->srv.GetAddressOf());
+    d->context->PSSetShaderResources(0, 1, &source);
     d->context->PSSetSamplers(0, 1, d->sampler.GetAddressOf());
     d->context->PSSetConstantBuffers(0, 1, d->constants.GetAddressOf());
     d->context->Draw(4, 0);
     ID3D11ShaderResourceView* empty = nullptr;
     d->context->PSSetShaderResources(0, 1, &empty);
+    d->context->Flush();
     d->swap->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
 }

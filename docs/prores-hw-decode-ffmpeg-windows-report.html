@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Windows + FFmpeg ProRes 硬解码可行性调研报告 | Cicada</title>
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg2: #1a2332;
+    --bg3: #243044;
+    --text: #e7ecf3;
+    --muted: #9aa8bc;
+    --accent: #5b9fd4;
+    --accent2: #7ec8a3;
+    --warn: #e6b35a;
+    --danger: #e07a7a;
+    --ok: #6bcf8e;
+    --border: #2d3a4d;
+    --link: #7eb8e8;
+    --code-bg: #121820;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+                 "Noto Sans CJK SC", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 16px;
+  }
+  a { color: var(--link); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  header.hero {
+    border: 1px solid var(--border);
+    background: linear-gradient(160deg, #1a2740 0%, #121820 60%);
+    border-radius: 14px;
+    padding: 2rem 1.75rem;
+    margin-bottom: 2rem;
+  }
+  header.hero h1 {
+    margin: 0 0 0.5rem;
+    font-size: 1.65rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 0.92rem;
+    display: flex; flex-wrap: wrap; gap: 0.75rem 1.5rem;
+    margin-top: 1rem;
+  }
+  .badge {
+    display: inline-block;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--bg3);
+  }
+  .badge.ok { color: var(--ok); border-color: #2a5a3e; }
+  .badge.warn { color: var(--warn); border-color: #6a5428; }
+  .badge.danger { color: var(--danger); border-color: #6a3030; }
+  .badge.info { color: var(--accent); border-color: #2a4a6a; }
+
+  .exec {
+    background: var(--bg2);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 10px 10px 0;
+    padding: 1.25rem 1.4rem;
+    margin: 1.5rem 0 2rem;
+  }
+  .exec h2 { margin: 0 0 0.75rem; font-size: 1.15rem; color: var(--accent); }
+  .exec ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+  .exec li { margin: 0.35rem 0; }
+
+  nav.toc {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 2.5rem;
+  }
+  nav.toc h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+  nav.toc ol { margin: 0; padding-left: 1.3rem; }
+  nav.toc li { margin: 0.35rem 0; }
+
+  h2.sec {
+    font-size: 1.35rem;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.5rem;
+    margin: 2.5rem 0 1rem;
+  }
+  h3 { font-size: 1.08rem; margin: 1.5rem 0 0.6rem; color: #c5d4e8; }
+  h4 { font-size: 0.98rem; margin: 1.2rem 0 0.4rem; color: #b0c0d4; }
+  p { margin: 0.7rem 0; }
+  .muted { color: var(--muted); }
+  .note {
+    background: #1e2a1e;
+    border: 1px solid #2f4a2f;
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  .warnbox {
+    background: #2a2418;
+    border: 1px solid #5a4a28;
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+  .dangerbox {
+    background: #2a1a1a;
+    border: 1px solid #5a3030;
+    border-radius: 8px;
+    padding: 0.9rem 1.1rem;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0 1.5rem;
+    font-size: 0.9rem;
+    background: var(--bg2);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: 0.55rem 0.7rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    background: var(--bg3);
+    color: #d0dceb;
+    font-weight: 600;
+  }
+  tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  code, .mono {
+    font-family: "Cascadia Code", "Consolas", "SF Mono", Menlo, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  pre code { background: none; padding: 0; }
+
+  .grid2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+  }
+  @media (max-width: 720px) {
+    .grid2 { grid-template-columns: 1fr; }
+    header.hero h1 { font-size: 1.35rem; }
+  }
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.15rem;
+  }
+  .card h4 { margin-top: 0; }
+  .verdict {
+    font-size: 1.05rem;
+    font-weight: 600;
+  }
+  footer {
+    margin-top: 3rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
+  .refs li { margin: 0.45rem 0; word-break: break-word; }
+  .tag-sw { color: var(--warn); }
+  .tag-vk { color: var(--ok); }
+  .tag-no { color: var(--danger); }
+  .tag-na { color: var(--muted); }
+
+  @media print {
+    :root {
+      --bg: #fff; --bg2: #f7f7f7; --bg3: #eee; --text: #111;
+      --muted: #444; --border: #ccc; --link: #0645ad;
+      --code-bg: #f0f0f0; --accent: #0645ad;
+    }
+    body { background: #fff; color: #111; }
+    header.hero, nav.toc, .exec, .card, table { break-inside: avoid; }
+    a { color: #0645ad; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div style="margin-bottom:0.6rem">
+    <span class="badge info">技术调研</span>
+    <span class="badge">Windows 10 / 11</span>
+    <span class="badge">FFmpeg 9.0.2</span>
+    <span class="badge warn">硬解有限</span>
+  </div>
+  <h1>Windows 播放器使用开源 FFmpeg 实现 ProRes「硬解码」可行性调研</h1>
+  <p class="muted" style="margin:0.5rem 0 0">
+    委托方：Cicada（Asia/Shanghai）· 范围：Windows 10 &amp; Windows 11 ·
+    基线：最新稳定开源发布版 <strong>FFmpeg 9.0.2 “Lei”</strong>（2026-09-18）
+  </p>
+  <div class="meta">
+    <span>报告日期：2026-10-24（Asia/Shanghai）</span>
+    <span>交付物：单文件离线 HTML</span>
+    <span>语言：简体中文</span>
+  </div>
+</header>
+
+<section class="exec" id="exec">
+  <h2>执行结论（先读这段）</h2>
+  <p class="verdict">
+    <span class="tag-no">否 — 在 Windows 上不能指望 NVDEC / D3D11VA / DXVA2 / QSV / AMF / Media Foundation 做真正的 ProRes 固定功能硬解。</span>
+    VideoToolbox 是 Apple 平台专用，Windows 无法使用。
+  </p>
+  <ul>
+    <li><strong>传统 GPU 硬解路径（NVDEC 等）</strong>：官方能力矩阵不含 ProRes；FFmpeg 亦无对应 <code>prores_nvdec</code> / <code>prores_d3d11va</code>。</li>
+    <li><strong>实际可用加速</strong>：① libavcodec <strong>软件解码</strong>（始终可用，无需额外 Apple 运行时）；② 自 FFmpeg 8.1 起合并、9.0.x 包含的 <strong>Vulkan compute shader</strong> 路径（<code>-hwaccel vulkan</code> / <code>prores_vulkan</code>）——这是 GPU 计算着色器加速，<em>不是</em> NVDEC 一类 ASIC 硬解。</li>
+    <li><strong>额外运行时</strong>：软件解只需 FFmpeg 本体；Vulkan 路径需要 Vulkan 1.x 驱动（随 NVIDIA/AMD/Intel 显卡驱动安装，Windows 不自带 VideoToolbox）。无需安装 Apple VideoToolbox。</li>
+    <li><strong>RTX A4000 + 8K60 ProRes + DX11 渲染</strong>：公开文献<strong>没有</strong> A4000 上 ProRes（Vulkan 或软件）的实测 FPS。按 GSoC 公开的 4K Vulkan 数据粗略外推，8K60（尤其 422 HQ / 4444）<strong>高度不确定，偏悲观（有条件才可能）</strong>；存储带宽本身即约数 Gbps 级瓶颈。</li>
+    <li><strong>产品建议</strong>：若需求字面是「ProRes 硬件解码」，在 Windows + 开源 FFmpeg 上应重新定义为「软件解 / Vulkan 计算加速」，并做实测；商业合规需注意 Apple 对未授权 ProRes 实现的声明。</li>
+  </ul>
+</section>
+
+<nav class="toc">
+  <h2>目录</h2>
+  <ol>
+    <li><a href="#q1">Windows 上 FFmpeg ProRes「硬解」需要哪些运行时？</a></li>
+    <li><a href="#q2">ProRes 家族有哪些格式？</a></li>
+    <li><a href="#q3">最新 FFmpeg 在 Windows 上能硬解哪些 ProRes？</a></li>
+    <li><a href="#q4">解码后 DX11 渲染与 RTX A4000 8K60 可行性</a></li>
+    <li><a href="#q5">免费 / 合法 ProRes 测试素材（已核验链接）</a></li>
+    <li><a href="#refs">参考文献与访问日期</a></li>
+  </ol>
+</nav>
+
+<!-- ===================== Q1 ===================== -->
+<section id="q1">
+  <h2 class="sec">1. Windows 上使用最新 FFmpeg 做 ProRes「硬解」是否需要额外运行时？</h2>
+
+  <h3>1.1 先澄清：VideoToolbox 不是 Windows 选项</h3>
+  <p>
+    <strong>VideoToolbox</strong> 是 Apple 在 macOS / iOS 上的多媒体加速框架。
+    FFmpeg 中存在 <code>prores_videotoolbox</code> hwaccel，但仅在 Apple 平台可用。
+    <strong>Windows 10 / 11 无法安装或调用 VideoToolbox</strong>，因此不存在「为 ProRes 硬解额外装 VT」这一路径。
+  </p>
+
+  <h3>1.2 Windows 上常见加速栈与 ProRes 关系</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>技术</th>
+        <th>性质</th>
+        <th>随系统 / 驱动？</th>
+        <th>对 ProRes？</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>D3D11VA</strong></td>
+        <td>Direct3D 11 Video Acceleration（FFmpeg <code>-hwaccel d3d11va</code>）</td>
+        <td>Windows + WDDM 显卡驱动</td>
+        <td class="tag-no">不支持 ProRes</td>
+      </tr>
+      <tr>
+        <td><strong>DXVA2</strong></td>
+        <td>较旧的 DirectX Video Acceleration</td>
+        <td>Windows + 驱动</td>
+        <td class="tag-no">不支持 ProRes</td>
+      </tr>
+      <tr>
+        <td><strong>NVDEC / CUDA</strong></td>
+        <td>NVIDIA 固定功能解码器（FFmpeg <code>cuda</code> / <code>*_cuvid</code>）</td>
+        <td>需 NVIDIA 驱动；运行时由驱动提供</td>
+        <td class="tag-no">官方列表无 ProRes（见下）</td>
+      </tr>
+      <tr>
+        <td><strong>Intel QSV</strong></td>
+        <td>Quick Sync Video</td>
+        <td>Intel 核显/独显驱动</td>
+        <td class="tag-no">不支持 ProRes</td>
+      </tr>
+      <tr>
+        <td><strong>AMD AMF</strong></td>
+        <td>Advanced Media Framework（偏编码；解码能力有限）</td>
+        <td>AMD 驱动</td>
+        <td class="tag-no">不支持 ProRes</td>
+      </tr>
+      <tr>
+        <td><strong>Media Foundation</strong></td>
+        <td>Windows 系统媒体管道</td>
+        <td>随 Windows；MFT 随驱动/应用</td>
+        <td class="tag-no">无系统级 ProRes 硬解 MFT；Adobe 等文档的「硬件解码」针对 H.264/HEVC</td>
+      </tr>
+      <tr>
+        <td><strong>Vulkan compute</strong></td>
+        <td>FFmpeg <code>prores_vulkan</code>（计算着色器解码）</td>
+        <td>Vulkan ICD 随 GPU 驱动；FFmpeg 需带 Vulkan 构建</td>
+        <td class="tag-vk">跨平台可用（含 Windows）— 属 GPU 加速，非 NVDEC</td>
+      </tr>
+      <tr>
+        <td><strong>libavcodec 软件 ProRes</strong></td>
+        <td>CPU SIMD 软件解码</td>
+        <td>仅需 FFmpeg 可执行文件 / DLL</td>
+        <td class="tag-sw">始终可用</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>1.3 NVIDIA NVDEC 官方支持列表（RTX A4000 同类）</h3>
+  <p>
+    NVIDIA Video Codec SDK / RTX A4000 产品说明列出的硬解编解码为：
+    <strong>MPEG-2、VC-1、H.264、H.265 (HEVC)、VP8、VP9、AV1</strong>。
+    <strong>未包含 ProRes</strong>。RTX A4000 宣传「第 5 代 NVDEC」同样沿用该列表。
+  </p>
+
+  <h3>1.4 实际需要安装什么？</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>路径 A：软件解码（推荐基线）</h4>
+      <ul>
+        <li>最新 FFmpeg Windows 构建（含 <code>prores</code> decoder）</li>
+        <li><strong>不需要</strong> VideoToolbox</li>
+        <li><strong>不需要</strong> 额外 Apple 运行时</li>
+        <li>GPU 驱动：仅在你要用 DX11 渲染时需要（与解码无关）</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h4>路径 B：Vulkan 计算加速（可选）</h4>
+      <ul>
+        <li>支持 Vulkan 的 GPU + 厂商驱动（NVIDIA Studio/GameReady 等）</li>
+        <li>FFmpeg 构建启用 <code>--enable-vulkan</code> 及 SPIR-V 编译器支持</li>
+        <li>使用 <code>-hwaccel vulkan</code></li>
+        <li>仍<strong>不是</strong> NVDEC / D3D11VA</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="warnbox">
+    <strong>关于 Apple ProRes RAW for Windows：</strong>
+    Apple 提供面向部分 Adobe 工作流的 <em>ProRes RAW for Windows</em> 组件（见 Apple 支持文档），
+    它<strong>不是</strong>通用 Media Foundation ProRes 422/4444 解码器，也<strong>不能</strong>替代 FFmpeg 的 ProRes 解码路径。
+    标准 ProRes（422/4444 系列）在开源 FFmpeg 侧走软件或 Vulkan 路径。
+  </div>
+
+  <h3>1.5 小节</h3>
+  <p>
+    在 Win10/Win11 + 最新开源 FFmpeg 上做 ProRes 播放：
+    <strong>无 Apple 特色运行时要求</strong>；也<strong>没有</strong>可对标 VideoToolbox 的系统级 ProRes 硬解运行时。
+    若采用 Vulkan 加速，只需常规 GPU 驱动自带的 Vulkan 支持 + 正确构建的 FFmpeg。
+  </p>
+</section>
+
+<!-- ===================== Q2 ===================== -->
+<section id="q2">
+  <h2 class="sec">2. ProRes 家族格式一览（官方命名）</h2>
+  <p>
+    以下依据 Apple Support《About Apple ProRes》与 <em>Apple ProRes White Paper</em>（2022-04）。
+    名称请保持英文产品名；「YUV422 / YUV444」是工程口语，Apple 文档多用 <strong>4:2:2 / 4:4:4</strong> 与 Y′C<sub>B</sub>C<sub>R</sub>。
+  </p>
+
+  <h3>2.1 标准 Apple ProRes（mezzanine，非 RAW）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>官方名称</th>
+        <th>色度</th>
+        <th>典型位深</th>
+        <th>Alpha</th>
+        <th>HD 29.97 目标码率（约）</th>
+        <th>FFmpeg <code>-profile:v</code></th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Apple ProRes 422 Proxy</td>
+        <td>4:2:2</td>
+        <td>10-bit</td>
+        <td>无</td>
+        <td>~45 Mbps</td>
+        <td>0 / <code>proxy</code></td>
+      </tr>
+      <tr>
+        <td>Apple ProRes 422 LT</td>
+        <td>4:2:2</td>
+        <td>10-bit</td>
+        <td>无</td>
+        <td>~102 Mbps</td>
+        <td>1 / <code>lt</code></td>
+      </tr>
+      <tr>
+        <td>Apple ProRes 422</td>
+        <td>4:2:2</td>
+        <td>10-bit</td>
+        <td>无</td>
+        <td>~147 Mbps</td>
+        <td>2 / <code>standard</code></td>
+      </tr>
+      <tr>
+        <td>Apple ProRes 422 HQ</td>
+        <td>4:2:2</td>
+        <td>10-bit</td>
+        <td>无</td>
+        <td>~220 Mbps</td>
+        <td>3 / <code>hq</code></td>
+      </tr>
+      <tr>
+        <td>Apple ProRes 4444</td>
+        <td>4:4:4（可含 A → 4:4:4:4）</td>
+        <td>图像最高 12-bit</td>
+        <td>可选；最高 16-bit，数学无损</td>
+        <td>~330 Mbps（无 alpha，1080p29.97）</td>
+        <td>4 / <code>4444</code></td>
+      </tr>
+      <tr>
+        <td>Apple ProRes 4444 XQ</td>
+        <td>4:4:4（可含 A）</td>
+        <td>图像最高 12-bit</td>
+        <td>可选；最高 16-bit，数学无损</td>
+        <td>~500 Mbps（无 alpha，1080p29.97）</td>
+        <td>5 / <code>4444xq</code></td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="muted">
+    Apple 明确：仅 <strong>4444</strong> 与 <strong>4444 XQ</strong> 支持 alpha 通道。
+    422 系列无 alpha。码率为 VBR 目标值，随内容波动，上限约目标 +10%。
+  </p>
+
+  <h3>2.2 Apple ProRes RAW（独立家族）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>名称</th>
+        <th>说明</th>
+        <th>与标准 ProRes 关系</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Apple ProRes RAW</td>
+        <td>压缩未去马赛克（Bayer）传感器数据</td>
+        <td>码流与解码流程和标准 ProRes <strong>不同</strong></td>
+      </tr>
+      <tr>
+        <td>Apple ProRes RAW HQ</td>
+        <td>更高码率 / 更高保真的 RAW 档</td>
+        <td>同上，属 RAW 家族</td>
+      </tr>
+    </tbody>
+  </table>
+  <p>
+    FFmpeg 另有 <code>prores_raw</code> 解码器及 <code>prores_raw_vulkan</code> /（Apple 上）<code>prores_raw_videotoolbox</code> hwaccel。
+    产品规划时应把「ProRes」与「ProRes RAW」分成两条能力线。
+  </p>
+
+  <h3>2.3 命名易混点</h3>
+  <ul>
+    <li>「ProRes YUV422 / YUV444」→ 对应官方 <strong>422 系列</strong> / <strong>4444 系列</strong>。</li>
+    <li>「带 Alpha」→ 仅 4444 / 4444 XQ。</li>
+    <li>「ProRes RAW」→ <strong>不是</strong> 4444 的别名，也不是某种 422 档。</li>
+    <li>FFmpeg / 第三方实现被 Apple 白皮书称为 <em>unauthorized</em>；商业发行请单独评估授权风险（见参考 [A3]、[A5]）。</li>
+  </ul>
+</section>
+
+<!-- ===================== Q3 ===================== -->
+<section id="q3">
+  <h2 class="sec">3. 最新 FFmpeg 在 Windows 上能「硬解」哪些 ProRes？</h2>
+
+  <p>
+    基线版本：<strong>FFmpeg 9.0.2</strong>（2026-09-18，当前最新稳定发布）。
+    ProRes Vulkan hwaccel / encoder 等自 <strong>8.1</strong> 起进入稳定线，并包含在 9.0 变更日志中。
+  </p>
+
+  <h3>3.1 必须区分的三类「加速」</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>类型</th>
+        <th>含义</th>
+        <th>Windows + FFmpeg 对 ProRes</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>固定功能硬解（ASIC）</strong></td>
+        <td>NVDEC / QSV / D3D11VA 等专用解码块</td>
+        <td class="tag-no"><strong>不支持</strong></td>
+      </tr>
+      <tr>
+        <td><strong>GPU 计算加速</strong></td>
+        <td>Vulkan compute shader（VLD + IDCT）</td>
+        <td class="tag-vk"><strong>支持</strong>（需 Vulkan 构建与驱动）</td>
+      </tr>
+      <tr>
+        <td><strong>软件解码</strong></td>
+        <td>libavcodec CPU 实现</td>
+        <td class="tag-sw"><strong>支持</strong>（默认路径）</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>3.2 FFmpeg 源码中的 ProRes 相关 hwaccel 符号</h3>
+  <p>当前 FFmpeg <code>libavcodec/hwaccels.h</code> 中与 ProRes 相关的声明包括：</p>
+  <ul>
+    <li><code>ff_prores_videotoolbox_hwaccel</code> — <span class="tag-na">仅 Apple</span></li>
+    <li><code>ff_prores_vulkan_hwaccel</code> — <span class="tag-vk">跨平台（含 Windows）</span></li>
+    <li><code>ff_prores_raw_videotoolbox_hwaccel</code> — <span class="tag-na">仅 Apple</span></li>
+    <li><code>ff_prores_raw_vulkan_hwaccel</code> — <span class="tag-vk">跨平台</span></li>
+  </ul>
+  <p>
+    <strong>不存在</strong> <code>prores_d3d11va</code>、<code>prores_dxva2</code>、<code>prores_nvdec</code>、<code>prores_qsv</code> 一类符号。
+    这与 NVIDIA / Adobe 文档中「硬解列表不含 ProRes」一致。
+  </p>
+
+  <h3>3.3 格式 × 路径 支持矩阵（Windows）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>格式</th>
+        <th>软件解 (libavcodec)</th>
+        <th>Vulkan compute</th>
+        <th>NVDEC / D3D11VA / QSV / AMF / MF</th>
+        <th>VideoToolbox</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>422 Proxy / LT / 422 / HQ</td>
+        <td class="tag-sw">是</td>
+        <td class="tag-vk">是（GSoC/Khronos：全 profile）</td>
+        <td class="tag-no">否</td>
+        <td class="tag-na">不适用</td>
+      </tr>
+      <tr>
+        <td>4444 / 4444 XQ（含 alpha）</td>
+        <td class="tag-sw">是</td>
+        <td class="tag-vk">是（含 alpha plane）</td>
+        <td class="tag-no">否</td>
+        <td class="tag-na">不适用</td>
+      </tr>
+      <tr>
+        <td>ProRes RAW / RAW HQ</td>
+        <td class="tag-sw">是（<code>prores_raw</code>）</td>
+        <td class="tag-vk">是（<code>prores_raw_vulkan</code>）</td>
+        <td class="tag-no">否</td>
+        <td class="tag-na">不适用</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    <strong>Vulkan ProRes 能力说明（来源：GSoC 2025 报告 / Khronos 2026-03 博文）：</strong>
+    头解析仍在 CPU；VLD（变长解码）与 IDCT 在 GPU compute shader。
+    支持 4:2:2 与 4:4:4、10/12-bit、隔行、alpha。
+    性能主要受 VLD shader 串行性限制，而非单纯显存带宽。
+  </div>
+
+  <h3>3.4 验证命令示例</h3>
+  <pre><code># 列出本机构建支持的 hwaccel
+ffmpeg -hwaccels
+
+# 软件解码（Windows 默认可靠路径）
+ffmpeg -i input.mov -an -f null -
+
+# Vulkan 计算加速（需 Vulkan 构建）
+ffmpeg -benchmark -hwaccel vulkan -i input.mov -an -f null -
+
+# 注意：以下对 ProRes 不会走真正硬解，勿误判
+ffmpeg -hwaccel d3d11va -i prores.mov -an -f null -
+ffmpeg -hwaccel cuda    -i prores.mov -an -f null -</code></pre>
+  <p class="muted">
+    若使用 <code>-hwaccel d3d11va|cuda</code> 而编解码器无对应 hwaccel，FFmpeg 通常回退软件解码；
+    日志中应确认实际使用的 decoder / hwaccel，避免误以为已硬解。
+  </p>
+
+  <h3>3.5 小节</h3>
+  <p class="verdict">
+    在 Windows 上，最新开源 FFmpeg 对<strong>全部常见 ProRes 档</strong>可软件解码；
+    对标准 ProRes 与 ProRes RAW 可通过 <strong>Vulkan compute</strong> 做 GPU 加速。
+    <strong>没有任何</strong>面向 Windows 的固定功能 ProRes 硬解（含 RTX A4000 的 NVDEC）。
+  </p>
+</section>
+
+<!-- ===================== Q4 ===================== -->
+<section id="q4">
+  <h2 class="sec">4. 解码后 DX11 纹理渲染：RTX A4000 能否撑住 8K 60fps？</h2>
+
+  <h3>4.1 目标场景</h3>
+  <ul>
+    <li>分辨率：用户指定 <strong>7680×4320</strong>（UHD-8K）；Apple 表多用 <strong>8192×4320</strong>（DCI-8K）</li>
+    <li>帧率：60 fps → 帧预算 <strong>16.67 ms/帧</strong></li>
+    <li>GPU：NVIDIA <strong>RTX A4000</strong>（GA104，16 GB GDDR6，<strong>448 GB/s</strong> 显存带宽，PCIe 4.0×16，1× NVDEC）</li>
+    <li>渲染：解码后上传 / 互操作到 <strong>Direct3D 11</strong> 纹理并呈现</li>
+  </ul>
+
+  <h3>4.2 存储 / 码率量级（Apple 白皮书，8192×4320）</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>Profile</th>
+        <th>8K 30p 目标</th>
+        <th>8K 60p 目标</th>
+        <th>60p 约合 MB/s</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>422 Proxy</td><td>778 Mb/s</td><td>1556 Mb/s</td><td>~195 MB/s</td></tr>
+      <tr><td>422 LT</td><td>1750 Mb/s</td><td>3500 Mb/s</td><td>~438 MB/s</td></tr>
+      <tr><td>422</td><td>2514 Mb/s</td><td>5028 Mb/s</td><td>~629 MB/s</td></tr>
+      <tr><td>422 HQ</td><td>3771 Mb/s</td><td>7542 Mb/s</td><td>~943 MB/s</td></tr>
+      <tr><td>4444（无 alpha）</td><td>5657 Mb/s</td><td>11313 Mb/s</td><td>~1.41 GB/s</td></tr>
+      <tr><td>4444 XQ（无 alpha）</td><td>8485 Mb/s</td><td>16970 Mb/s</td><td>~2.12 GB/s</td></tr>
+    </tbody>
+  </table>
+  <p>
+    对 <strong>7680×4320</strong> 可按像素比 ×(7680/8192)≈0.9375 粗算。
+    即便 Proxy，60p 也需数百 MB/s 持续读盘；HQ/4444 需要高速 NVMe RAID 级吞吐。
+    <strong>存储往往先于 GPU 成为瓶颈。</strong>
+  </p>
+
+  <h3>4.3 解码后未压缩帧体量（估算）</h3>
+  <p>以 7680×4320、yuv422p10（每分量 16-bit 容器常见）为例：</p>
+  <ul>
+    <li>Y：7680×4320×2 ≈ 66.4 MB</li>
+    <li>U+V：各 3840×4320×2 ≈ 33.2 MB → 合计约 <strong>99.5 MB/帧</strong></li>
+    <li>60 fps 像素吞吐 ≈ <strong>6.0 GB/s</strong>（远低于 A4000 448 GB/s 显存带宽，故显存带宽本身通常不是第一瓶颈）</li>
+  </ul>
+  <p>4444 / 12-bit / 带 alpha 时帧体积显著更大。</p>
+
+  <h3>4.4 三条路径的可行性判断</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>路径</th>
+        <th>8K60 判断</th>
+        <th>依据与瓶颈</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>NVDEC 硬解 → DX11</td>
+        <td class="tag-no"><strong>不可行</strong></td>
+        <td>NVDEC 无 ProRes；无公开零拷贝路径可谈</td>
+      </tr>
+      <tr>
+        <td>CPU 软件解 → 上传 DX11 纹理</td>
+        <td class="tag-no"><strong>极困难 / 通常否</strong></td>
+        <td>
+          8K60 HQ 解压 + 色彩转换 + <code>UpdateSubresource</code> / staging 上传，
+          单帧 ~100 MB 级 PCIe 往返；无公开 A4000 软件解 8K60 达标数据。
+          高核 CPU 上 4K ProRes 实时常见，8K60 HQ 不乐观。
+        </td>
+      </tr>
+      <tr>
+        <td>Vulkan ProRes →（互操作）DX11</td>
+        <td class="tag-sw"><strong>有条件 / 未知</strong></td>
+        <td>
+          GSoC：4K yuv422p10 在 Radeon 6700XT 上约 <strong>178 fps</strong>（解码基准，非完整播放器）。
+          像素数 8K≈4×4K → 线性外推约 <strong>~45 fps</strong>，低于 60。
+          A4000 无公开对照；VLD 瓶颈使缩放未必线性。
+          Vulkan↔D3D11 互操作或回读再上传会再吃预算。
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="dangerbox">
+    <strong>诚实声明：</strong>
+    截至 2026-10-24，检索未找到「RTX A4000 + ProRes（软件或 Vulkan）+ 8K60 持续播放」的公开基准。
+    上表 8K 外推为<strong>估算</strong>，不能当作承诺值。产品立项必须以实机素材压测为准。
+  </div>
+
+  <h3>4.5 DX11 纹理上传注意点</h3>
+  <ul>
+    <li>软件解输出多为 CPU 侧 <code>yuv422p10le</code> / <code>yuv444p10le</code> / <code>yuva444p10le</code> 等，需转换到
+      DX11 可用格式（如 <code>R16G16B16A16_UNORM</code>、<code>NV12</code> 不直接对应 422/10-bit ProRes 输出）。</li>
+    <li>ProRes 常见不是 NV12/P010（那些多为 4:2:0 广播硬解输出）。按 422/444 设计 shader 采样。</li>
+    <li>每帧 <code>Map</code> staging + <code>CopySubresourceRegion</code> 在 8K 上成本高；应双缓冲、异步拷贝、尽量减少格式转换次数。</li>
+    <li>若走 Vulkan 解码，优先评估 <strong>Vulkan–D3D11 外部内存互操作</strong>，避免 GPU→CPU→GPU 回读。</li>
+  </ul>
+
+  <h3>4.6 综合结论（A4000 × 8K60）</h3>
+  <div class="exec" style="margin-top:1rem">
+    <ul>
+      <li><strong>「NVDEC 硬解 ProRes 达 8K60」：否。</strong></li>
+      <li><strong>「FFmpeg 软件解 + DX11 上传稳定 8K60 HQ」：公开数据不支持乐观结论；倾向否，除非 Proxy/极强 CPU + 极速盘并接受掉帧风险。</strong></li>
+      <li><strong>「Vulkan ProRes + DX11 呈现 8K60」：有条件可能（偏低档 / 优化良好时），但对 422 HQ/4444 偏悲观；必须实测。</strong></li>
+      <li>更稳妥工程策略：原生 8K 用 Proxy/半分辨率预览；成片导出转 HEVC/AV1（A4000 NVDEC 可硬解）再做 8K60 播放演示。</li>
+    </ul>
+  </div>
+</section>
+
+<!-- ===================== Q5 ===================== -->
+<section id="q5">
+  <h2 class="sec">5. 免费 / 合法 ProRes 测试素材（链接已核验）</h2>
+  <p>
+    下列 URL 于 <strong>2026-10-24（Asia/Shanghai）</strong> 使用 HTTP HEAD（curl）核验为可访问（HTTP 200），
+    并优先选择明确用于测试 / 格式语料、可合理用于编解码互操作测试的样本。
+    Internet Archive 上部分电影预告片集合存在版权灰色地带，<strong>本报告不推荐</strong>作为默认测试源。
+  </p>
+
+  <h3>5.1 已核验可用</h3>
+  <table>
+    <thead>
+      <tr>
+        <th>来源</th>
+        <th>说明</th>
+        <th>URL</th>
+        <th>核验</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>FFmpeg FATE suite</td>
+        <td>ProRes 422 / HQ / LT / Proxy / Alpha 短片段索引</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/">https://fate-suite.ffmpeg.org/prores/</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FATE</td>
+        <td>Sequence_1 Apple ProRes 422 HQ（~180 KB）</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/Sequence_1-Apple_ProRes_422_HQ.mov">…/Sequence_1-Apple_ProRes_422_HQ.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FATE</td>
+        <td>ProRes 422</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/Sequence_1-Apple_ProRes_422.mov">…/Sequence_1-Apple_ProRes_422.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FATE</td>
+        <td>ProRes 422 LT</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/Sequence_1-Apple_ProRes_422_LT.mov">…/Sequence_1-Apple_ProRes_422_LT.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FATE</td>
+        <td>ProRes 422 Proxy</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/Sequence_1-Apple_ProRes_422_Proxy.mov">…/Sequence_1-Apple_ProRes_422_Proxy.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FATE</td>
+        <td>带 Alpha</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/Sequence_1-Apple_ProRes_with_Alpha.mov">…/Sequence_1-Apple_ProRes_with_Alpha.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FATE</td>
+        <td>4444 + transparency</td>
+        <td><a href="https://fate-suite.ffmpeg.org/prores/prores4444_with_transparency.mov">…/prores4444_with_transparency.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FFmpeg samples</td>
+        <td>较大 AppleProRes422.mov（~97 MB）</td>
+        <td><a href="https://samples.ffmpeg.org/V-codecs/HCPA/AppleProRes422.mov">https://samples.ffmpeg.org/V-codecs/HCPA/AppleProRes422.mov</a></td>
+        <td>200</td>
+      </tr>
+      <tr>
+        <td>FFmpeg samples</td>
+        <td>partial 片段（10 MB）</td>
+        <td><a href="https://samples.ffmpeg.org/V-codecs/HCPA/Boar__Apple_ProRes_422-partial.mov">…/Boar__Apple_ProRes_422-partial.mov</a></td>
+        <td>200</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h3>5.2 自行生成（推荐用于 4K/8K 压测）</h3>
+  <p>
+    公开短样本多为低分辨率。8K60 压测建议用 FFmpeg 自生成（注意：Apple 视 FFmpeg ProRes 为未授权实现，仅建议内部工程测试）：
+  </p>
+  <pre><code># 10 秒 4K ProRes 422 HQ
+ffmpeg -f lavfi -i testsrc2=size=3840x2160:rate=60:duration=10 \
+  -pix_fmt yuv422p10le -c:v prores_ks -profile:v 3 -y prores_4k60_hq.mov
+
+# 5 秒 8K ProRes 422 Proxy（体积相对可控）
+ffmpeg -f lavfi -i testsrc2=size=7680x4320:rate=60:duration=5 \
+  -pix_fmt yuv422p10le -c:v prores_ks -profile:v 0 -y prores_8k60_proxy.mov</code></pre>
+
+  <h3>5.3 已排除 / 不推荐</h3>
+  <ul>
+    <li><code>opf-labs.org</code> format-corpus QuickTime ProRes：本次 HEAD 无有效响应，不列入。</li>
+    <li>Internet Archive「Various ProRes/High Quality Video Files」集合：内容多为商业影视物料，版权状态不清；抽样直链出现 404，不推荐。</li>
+    <li>Apple 支持文档教你在 Final Cut Pro 内<strong>自行导出</strong>测试 MOV，但不提供公开直链下载。</li>
+  </ul>
+</section>
+
+<!-- ===================== Refs ===================== -->
+<section id="refs">
+  <h2 class="sec">6. 参考文献与访问日期</h2>
+  <p class="muted">所有链接访问日期：2026-10-24（Asia/Shanghai），除非另注。</p>
+  <ol class="refs">
+    <li id="r1">FFmpeg Download — 9.0.2 “Lei”：<a href="https://ffmpeg.org/download.html">https://ffmpeg.org/download.html</a></li>
+    <li>FFmpeg HWAccelIntro：<a href="https://trac.ffmpeg.org/wiki/HWAccelIntro">https://trac.ffmpeg.org/wiki/HWAccelIntro</a></li>
+    <li>FFmpeg <code>hwaccels.h</code>（含 <code>prores_vulkan</code> 等）：
+      <a href="https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/hwaccels.h">https://github.com/FFmpeg/FFmpeg/blob/master/libavcodec/hwaccels.h</a></li>
+    <li>FFmpeg 8.1 / 9.0 Changelog（ProRes Vulkan hwaccel 条目）：
+      <a href="https://github.com/FFmpeg/FFmpeg/blob/release/8.1/Changelog">release/8.1/Changelog</a> ·
+      <a href="https://github.com/FFmpeg/FFmpeg/blob/release/9.0/Changelog">release/9.0/Changelog</a></li>
+    <li>Khronos Blog（2026-03-16），Lynne — Vulkan compute codecs in FFmpeg（含 ProRes）：
+      <a href="https://www.khronos.org/blog/video-encoding-and-decoding-with-vulkan-compute-shaders-in-ffmpeg">khronos.org/blog/…</a></li>
+    <li>averne — Vulkan ProRes decoder GSoC report（4K 基准 178 fps @ 6700XT）：
+      <a href="https://averne.github.io/posts/250831_gsoc-25-report/report.html">averne.github.io/…</a></li>
+    <li>Apple Support — About Apple ProRes：
+      <a href="https://support.apple.com/en-us/102207">https://support.apple.com/en-us/102207</a></li>
+    <li>Apple — Apple ProRes White Paper（PDF，2022-04，含 8K 码率表）：
+      <a href="https://www.apple.com/final-cut-pro/docs/Apple_ProRes.pdf">https://www.apple.com/final-cut-pro/docs/Apple_ProRes.pdf</a></li>
+    <li>Apple — Apple ProRes RAW White Paper：
+      <a href="https://www.apple.com/final-cut-pro/docs/Apple_ProRes_RAW_White_Paper.pdf">…/Apple_ProRes_RAW_White_Paper.pdf</a></li>
+    <li>Apple — ProRes / ProRes RAW Authorized Products：
+      <a href="https://support.apple.com/en-us/118584">https://support.apple.com/en-us/118584</a></li>
+    <li>Apple — ProRes RAW for Windows：
+      <a href="https://support.apple.com/en-us/106401">https://support.apple.com/en-us/106401</a></li>
+    <li>NVIDIA Video Codec SDK（NVDEC 编解码列表）：
+      <a href="https://developer.nvidia.com/video-codec-sdk">https://developer.nvidia.com/video-codec-sdk</a></li>
+    <li>NVIDIA RTX A4000 Datasheet（NVDEC 编解码列表、16GB、带宽）：
+      <a href="https://www.nvidia.com/content/dam/en-zz/Solutions/gtcs21/rtx-a4000/nvidia-rtx-a4000-datasheet.pdf">A4000 datasheet PDF</a></li>
+    <li>Adobe Premiere — Supported codecs for hardware-accelerated decoding（H.264/HEVC，非 ProRes）：
+      <a href="https://helpx.adobe.com/premiere/desktop/get-started/technical-requirements/supported-codecs-and-drivers-for-hardware-accelerated-decoding.html">helpx.adobe.com/…</a></li>
+    <li>Larry Jordan — Get Ready for 8K Video（引用 Apple 8K ProRes 带宽）：
+      <a href="https://larryjordan.com/articles/get-ready-for-8k-video/">larryjordan.com/…</a></li>
+    <li>FFmpeg FATE ProRes samples：
+      <a href="https://fate-suite.ffmpeg.org/prores/">https://fate-suite.ffmpeg.org/prores/</a></li>
+    <li>FFmpeg samples HCPA：
+      <a href="https://samples.ffmpeg.org/V-codecs/HCPA/">https://samples.ffmpeg.org/V-codecs/HCPA/</a></li>
+  </ol>
+</section>
+
+<footer>
+  <p>
+    本报告供 Cicada 内部技术决策使用。数据来自公开文档与源码；
+    性能数字凡标注「估算」者均非正式基准。
+    FFmpeg 对 ProRes 的实现未被 Apple 列为授权产品——量产播放器请同步评估授权与互操作风险。
+  </p>
+  <p>文件：<code>/workspace/prores-hw-decode-ffmpeg-windows-report.html</code> · 生成时区：Asia/Shanghai · 2026-10-24</p>
+</footer>
+
+</div>
+</body>
+</html>

@@ -3,9 +3,20 @@
 #include <QObject>
 #include <QString>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "GpuAdapter.h"
+
+enum class DecodePath {
+    Software = 0,
+    VulkanReadback = 1,
+    VulkanZeroCopy = 2,
+};
+
+constexpr int kPathSoftware = 1 << static_cast<int>(DecodePath::Software);
+constexpr int kPathReadback = 1 << static_cast<int>(DecodePath::VulkanReadback);
+constexpr int kPathZeroCopy = 1 << static_cast<int>(DecodePath::VulkanZeroCopy);
 
 struct VideoFrame {
     int width = 0;
@@ -13,6 +24,9 @@ struct VideoFrame {
     bool alpha = false;
     double pts = 0.0;
     std::vector<uint8_t> bgra;
+    bool zeroCopy = false;
+    quintptr sharedHandle = 0;
+    std::shared_ptr<void> slot;
 };
 
 class Player : public QObject {
@@ -29,6 +43,8 @@ public:
     void seekRelative(double deltaSeconds);
     void setLoop(bool on);
     void setGpu(const GpuAdapter& adapter);
+    void setDecodePath(int path);
+    int decodePath() const;
 
     bool takeFrameForClock(VideoFrame& out);
     qint64 positionMs() const;
@@ -38,6 +54,7 @@ public:
 signals:
     void statusChanged(const QString& text);
     void timingChanged(qint64 positionMs, qint64 durationMs);
+    void decodeOptionsChanged(int mask, int path);
 
 private:
     void decodeLoop(const QString& path);
