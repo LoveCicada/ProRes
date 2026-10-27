@@ -43,4 +43,4 @@ cmake --build build --config Release
 
 运行 `build\Release\ProResPlayer.exe`。构建步骤会把 FFmpeg DLL、`MediaInfo.dll` 和 Qt 运行库拷到该目录。
 
-功能完成情况见 [docs/features.md](docs/features.md)。手工测试用例见 [docs/test-cases.md](docs/test-cases.md)。结构说明见 [docs/development.md](docs/development.md)。
+功能完成情况见 [docs/features.md](docs/features.md)。手工测试用例见 [docs/test-cases.md](docs/test-cases.md)。结构说明见 [docs/development.md](docs/development.md)。架构图、时序图与 Vulkan 零拷贝设计见 [docs/开发文档.md](docs/%E5%BC%80%E5%8F%91%E6%96%87%E6%A1%A3.md)。

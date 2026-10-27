@@ -24,6 +24,8 @@ Windows 上的简易播放器。标准 ProRes 和 ProRes RAW 可以走 FFmpeg 9.
 
 Vulkan 回读经 `av_hwframe_transfer_data` 拷回内存，`sws_scale` 成 8-bit BGRA，再上传到 DX11 动态纹理。零拷贝则由 Vulkan 计算着色器写入共享纹理。像素着色器在 alpha 有效时把画面叠到棋盘格上。播放区窗口区域是圆角。
 
+零拷贝的 LUID 对齐、共享纹理、槽位与 GPU 管线见 [开发文档.md](开发文档.md) 中「Vulkan 零拷贝设计」。
+
 ## 依赖位置
 
 - Qt 前缀：`QT_DIR` 的上一级，本机为 `D:\soft\Qt5.12.12\5.12.12\msvc2017_64`
