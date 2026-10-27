@@ -32,7 +32,7 @@ Vulkan 回读经 `av_hwframe_transfer_data` 拷回内存，`sws_scale` 成 8-bit
 - FFmpeg：`3rd/ffmpeg`（`9.0.2-full_build-www.gyan.dev`，`ffmpeg -hwaccels` 含 `vulkan`）
 - MediaInfo：运行时 `LoadLibrary(MediaInfo.dll)`，头文件在 `3rd/MediaInfo/Developers/Source/MediaInfoDLL/MediaInfoDLL.h`
 
-构建后把 FFmpeg 的 `bin` 和 `MediaInfo.dll` 拷到可执行文件旁边，并用 `windeployqt` 带上 Qt 运行库。
+构建后把 FFmpeg 的 `bin` 和 `MediaInfo.dll` 拷到可执行文件旁边，并用 `windeployqt` 带上 Qt 运行库。`vulkan-1.dll` 不在拷贝列表内，硬解依赖系统/驱动提供的 Loader，说明见 [README.md](../README.md)「Vulkan 硬解环境」下的「Vulkan Loader（vulkan-1.dll）」。
 
 ## 配置
 

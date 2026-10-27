@@ -34,6 +34,12 @@
 
 隔行和逐行走同一个着色器，隔行尚未实测。ProRes RAW 是另一个解码器，不在这张表里。
 
+### Vulkan Loader（vulkan-1.dll）
+
+硬解需要系统能加载 **Khronos Loader** `vulkan-1.dll`（一般由 NVIDIA、AMD、Intel 显卡驱动安装到系统目录）。播放器在按 LUID 匹配显卡时会 `LoadLibrary` 该 DLL；FFmpeg 创建 Vulkan 设备时也会使用同一 Loader。本工程 **不链接** `vulkan-1.lib`，也不在仓库 `3rd/` 中存放 Loader。
+
+CMake 构建只会把 `3rd/ffmpeg/bin` 与 `MediaInfo.dll` 拷到 `build\Release`（及发布目录），**不会** 下载或打包 Vulkan SDK 里的 `vulkan-1.dll`。随包附带 SDK 版 Loader 可能干扰显卡驱动自带的 ICD 加载，因此不做。硬解不可用且系统找不到 Loader 时，应安装或更新显卡驱动，而不是在输出目录手动塞一份 SDK DLL。
+
 ## 构建
 
 ```
