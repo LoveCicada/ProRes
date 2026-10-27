@@ -1,6 +1,7 @@
 #include "Player.h"
 #include "VulkanCopy.h"
 
+#include <QAudio>
 #include <QAudioFormat>
 #include <QAudioOutput>
 #include <QIODevice>
@@ -8,8 +9,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <cstring>
+#include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <string>
@@ -130,10 +131,45 @@ int vulkanDeviceIndex(qint64 luidHigh, quint32 luidLow)
     instanceInfo.sType = 1;
     instanceInfo.applicationInfo = &app;
 
+    const char* kLuidExtensions[] = {
+        "VK_KHR_get_physical_device_properties2",
+        "VK_KHR_external_memory_capabilities",
+    };
+    std::vector<const char*> enabledExtensions;
+    using FnEnumExt = int (__stdcall*)(const char*, uint32_t*, void*);
+    auto enumerateExtensions = reinterpret_cast<FnEnumExt>(
+        getProc(nullptr, "vkEnumerateInstanceExtensionProperties"));
+    if (enumerateExtensions) {
+        uint32_t extensionCount = 0;
+        enumerateExtensions(nullptr, &extensionCount, nullptr);
+        struct ExtensionProperty {
+            char name[256];
+            uint32_t version;
+        };
+        std::vector<ExtensionProperty> available(extensionCount);
+        if (extensionCount > 0
+            && enumerateExtensions(nullptr, &extensionCount, available.data()) == 0) {
+            for (const char* wantedName : kLuidExtensions) {
+                for (const ExtensionProperty& property : available) {
+                    if (std::strcmp(property.name, wantedName) == 0) {
+                        enabledExtensions.push_back(wantedName);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    instanceInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
+    instanceInfo.enabledExtensionNames = enabledExtensions.empty() ? nullptr : enabledExtensions.data();
+
     void* instance = nullptr;
     if (createInstance(&instanceInfo, nullptr, &instance) != 0 || !instance) {
-        FreeLibrary(library);
-        return -1;
+        instanceInfo.enabledExtensionCount = 0;
+        instanceInfo.enabledExtensionNames = nullptr;
+        if (createInstance(&instanceInfo, nullptr, &instance) != 0 || !instance) {
+            FreeLibrary(library);
+            return -1;
+        }
     }
     auto destroyInstance = reinterpret_cast<FnDestroy>(getProc(instance, "vkDestroyInstance"));
     auto enumerate = reinterpret_cast<FnEnum>(getProc(instance, "vkEnumeratePhysicalDevices"));
@@ -197,7 +233,14 @@ DecodePath choosePath(int mask)
     return DecodePath::Software;
 }
 
-QString modeText(DecodePath path, const QString& gpu)
+enum class ProbeNote {
+    None,
+    NoVulkanDevice,
+    VulkanCreateFailed,
+    FrameNotVulkan
+};
+
+QString modeText(DecodePath path, const QString& gpu, const QString& note)
 {
     QString text = QString::fromUtf8("\xE8\xBD\xAF\xE8\xA7\xA3");
     if (path == DecodePath::VulkanReadback)
@@ -206,15 +249,40 @@ QString modeText(DecodePath path, const QString& gpu)
         text = QString::fromUtf8("Vulkan \xE9\x9B\xB6\xE6\x8B\xB7\xE8\xB4\x9D");
     if (path != DecodePath::Software && !gpu.isEmpty())
         text += QStringLiteral(" · ") + gpu;
+    if (path == DecodePath::Software && !note.isEmpty())
+        text += QStringLiteral(" · ") + note;
     return text;
 }
 
-int probeDecodeMask(const char* path, int vulkanIndex, qint64 luidHigh, quint32 luidLow)
+QString probeNoteText(ProbeNote note)
 {
+    if (note == ProbeNote::NoVulkanDevice) {
+        return QString::fromUtf8(
+            "\xE9\x80\x89\xE4\xB8\xAD\xE7\x9A\x84\xE6\x98\xBE\xE5\x8D\xA1\xE6\xB2\xA1\xE6\x9C\x89"
+            "\xE5\xAF\xB9\xE5\xBA\x94\xE7\x9A\x84\x20\x56\x75\x6C\x6B\x61\x6E\x20"
+            "\xE8\xAE\xBE\xE5\xA4\x87");
+    }
+    if (note == ProbeNote::VulkanCreateFailed) {
+        return QString::fromUtf8(
+            "\x56\x75\x6C\x6B\x61\x6E\x20\xE8\xAE\xBE\xE5\xA4\x87"
+            "\xE5\x88\x9B\xE5\xBB\xBA\xE5\xA4\xB1\xE8\xB4\xA5");
+    }
+    if (note == ProbeNote::FrameNotVulkan) {
+        return QString::fromUtf8(
+            "\xE7\xAC\xAC\xE4\xB8\x80\xE5\xB8\xA7\xE4\xB8\x8D\xE6\x98\xAF\x20"
+            "\x56\x75\x6C\x6B\x61\x6E");
+    }
+    return {};
+}
+
+int probeDecodeMask(const char* path, int vulkanIndex, qint64 luidHigh, quint32 luidLow, ProbeNote* note)
+{
+    if (note)
+        *note = ProbeNote::None;
     if (!path)
         return 0;
     const int previous = av_log_get_level();
-    av_log_set_level(AV_LOG_FATAL);
+    av_log_set_level(AV_LOG_ERROR);
     int mask = 0;
 
     AVFormatContext* format = nullptr;
@@ -236,10 +304,15 @@ int probeDecodeMask(const char* path, int vulkanIndex, qint64 luidHigh, quint32 
     if (codec)
         mask |= kPathSoftware;
 
-    const bool wantVulkan = codec && proresFamily(codecId) && vulkanIndex >= 0;
+    const bool prores = codec && proresFamily(codecId);
+    const bool wantVulkan = prores && vulkanIndex >= 0;
+    if (note && prores && vulkanIndex < 0)
+        *note = ProbeNote::NoVulkanDevice;
     const std::string deviceName = std::to_string(vulkanIndex);
     const bool deviceOk = wantVulkan
         && av_hwdevice_ctx_create(&hw, AV_HWDEVICE_TYPE_VULKAN, deviceName.c_str(), nullptr, 0) >= 0;
+    if (note && wantVulkan && !deviceOk)
+        *note = ProbeNote::VulkanCreateFailed;
     if (deviceOk)
         ctx = avcodec_alloc_context3(codec);
     const bool paramsOk = ctx && avcodec_parameters_to_context(ctx, format->streams[videoIndex]->codecpar) >= 0;
@@ -273,9 +346,13 @@ int probeDecodeMask(const char* path, int vulkanIndex, qint64 luidHigh, quint32 
     }
     if (vulkanFrame) {
         mask |= kPathReadback;
+        if (note)
+            *note = ProbeNote::None;
         VulkanCopy copy;
         if (copy.init(hw, luidHigh, luidLow) && copy.canImportSharedTexture())
             mask |= kPathZeroCopy;
+    } else if (note && wantVulkan && deviceOk && *note == ProbeNote::None) {
+        *note = ProbeNote::FrameNotVulkan;
     }
 
     av_frame_free(&frame);
@@ -301,6 +378,7 @@ struct Player::Engine {
     std::atomic<qint64> luidHigh { 0 };
     std::atomic<quint32> luidLow { 0 };
     QString gpuName;
+    QString probeNote;
     std::atomic<int> requestedPath { static_cast<int>(DecodePath::Software) };
     std::atomic<int> activePath { static_cast<int>(DecodePath::Software) };
     std::atomic<int> pathMask { kPathSoftware };
@@ -317,6 +395,8 @@ struct Player::Engine {
     std::mutex videoMutex;
     std::condition_variable videoCv;
     std::deque<VideoFrame> video;
+    std::atomic<int> decodePushed { 0 };
+    std::atomic<int> videoQueued { 0 };
     std::mutex pcmMutex;
     std::condition_variable pcmCv;
     std::deque<PcmChunk> pcm;
@@ -339,6 +419,10 @@ struct Player::Engine {
     double wallAccum = 0.0;
     double wallOrigin = 0.0;
     std::chrono::steady_clock::time_point wallStart {};
+    double lastAudioPlayed = -1.0;
+    std::chrono::steady_clock::time_point lastAudioMove {};
+    bool audioMoveValid = false;
+    bool audioHoldRestart = false;
     int appliedSeek = 0;
 
     void setStatus(const QString& text)
@@ -352,6 +436,7 @@ struct Player::Engine {
         {
             std::lock_guard<std::mutex> lock(videoMutex);
             video.clear();
+            videoQueued.store(0);
         }
         videoCv.notify_all();
         {
@@ -371,16 +456,21 @@ struct Player::Engine {
         if (stop.load() || seekPending.load() || pause.load())
             return;
         video.push_back(std::move(frame));
+        decodePushed.fetch_add(1);
+        videoQueued.store(static_cast<int>(video.size()));
     }
 
     void pushPcm(PcmChunk chunk)
     {
         const size_t limit = static_cast<size_t>(sampleRate) * static_cast<size_t>(channels) * 4;
-        std::unique_lock<std::mutex> lock(pcmMutex);
-        pcmCv.wait(lock, [&] {
-            return stop.load() || seekPending.load() || pause.load() || pcmBytes < limit;
-        });
+        std::lock_guard<std::mutex> lock(pcmMutex);
         if (stop.load() || seekPending.load() || pause.load())
+            return;
+        while (!pcm.empty() && pcmBytes + chunk.bytes.size() > limit) {
+            pcmBytes -= pcm.front().bytes.size();
+            pcm.pop_front();
+        }
+        if (chunk.bytes.empty() || chunk.bytes.size() > limit)
             return;
         pcmBytes += chunk.bytes.size();
         pcm.push_back(std::move(chunk));
@@ -402,6 +492,21 @@ Player::~Player()
 QString Player::filePath() const
 {
     return m->path;
+}
+
+int Player::decodePushed() const
+{
+    return m->decodePushed.load();
+}
+
+int Player::videoQueued() const
+{
+    return m->videoQueued.load();
+}
+
+int Player::videoQueueMax() const
+{
+    return kMaxFrames;
 }
 
 qint64 Player::positionMs() const
@@ -427,6 +532,9 @@ void Player::open(const QString& path)
     m->appliedSeek = 0;
     m->seekFinished = 0;
     m->audioBaseValid = false;
+    m->lastAudioPlayed = -1.0;
+    m->audioMoveValid = false;
+    m->audioHoldRestart = false;
     m->wallAccum = 0.0;
     m->wallOrigin = 0.0;
     m->wallRunning = true;
@@ -449,7 +557,7 @@ void Player::play()
     m->pause = false;
     if (m->audio)
         m->audio->resume();
-    if (!m->audioReady) {
+    if (!m->wallRunning) {
         m->wallStart = std::chrono::steady_clock::now();
         m->wallRunning = true;
     }
@@ -496,6 +604,9 @@ void Player::stop()
     }
     m->audioReady = false;
     m->audioBaseValid = false;
+    m->lastAudioPlayed = -1.0;
+    m->audioMoveValid = false;
+    m->audioHoldRestart = false;
     m->position = 0.0;
     m->eof = false;
     m->wallRunning = false;
@@ -527,6 +638,9 @@ void Player::seekSeconds(double seconds)
     m->position = seconds;
     m->dropUntil = seconds;
     m->audioBaseValid = false;
+    m->lastAudioPlayed = -1.0;
+    m->audioMoveValid = false;
+    m->audioHoldRestart = false;
     m->wallOrigin = seconds;
     m->wallAccum = 0.0;
     m->wallStart = std::chrono::steady_clock::now();
@@ -585,6 +699,9 @@ void Player::setDecodePath(int path)
     m->position = seconds;
     m->dropUntil = seconds;
     m->audioBaseValid = false;
+    m->lastAudioPlayed = -1.0;
+    m->audioMoveValid = false;
+    m->audioHoldRestart = false;
     m->wallOrigin = seconds;
     m->wallAccum = 0.0;
     m->wallStart = std::chrono::steady_clock::now();
@@ -610,6 +727,9 @@ bool Player::takeFrameForClock(VideoFrame& out)
             m->audioDevice = m->audio->start();
         }
         m->audioBaseValid = false;
+        m->lastAudioPlayed = -1.0;
+        m->audioMoveValid = false;
+        m->audioHoldRestart = false;
         m->wallAccum = 0.0;
         m->wallOrigin = m->position.load();
         m->wallStart = std::chrono::steady_clock::now();
@@ -642,6 +762,30 @@ bool Player::takeFrameForClock(VideoFrame& out)
         }
     }
 
+    const auto now = std::chrono::steady_clock::now();
+    if (m->audio && !m->pause.load()) {
+        const QAudio::State state = m->audio->state();
+        const double playedNow = m->audioBaseValid ? m->audio->processedUSecs() / 1000000.0 : 0.0;
+        const bool audioFrozen = m->audioMoveValid
+            && playedNow <= m->lastAudioPlayed + 0.0005
+            && std::chrono::duration<double>(now - m->lastAudioMove).count() > 0.15;
+        if (state == QAudio::StoppedState || (state == QAudio::IdleState && audioFrozen)) {
+            if (!m->audioHoldRestart) {
+                const double nowPts = m->audioBaseValid ? m->audioBase + playedNow : m->position.load();
+                m->audioDevice = m->audio->start();
+                m->audioReady = m->audioDevice != nullptr;
+                m->audioBase = nowPts;
+                m->audioBaseValid = m->audioReady;
+                m->lastAudioPlayed = 0.0;
+                m->lastAudioMove = now;
+                m->audioMoveValid = true;
+                m->audioHoldRestart = true;
+            }
+        } else {
+            m->audioHoldRestart = false;
+        }
+    }
+
     if (m->audioDevice && m->audio) {
         const int freeBytes = m->audio->bytesFree();
         std::vector<char> pending;
@@ -671,13 +815,38 @@ bool Player::takeFrameForClock(VideoFrame& out)
         m->pcmCv.notify_all();
     }
 
-    double clock = m->wallOrigin + m->wallAccum;
-    if (m->audioReady && m->audioBaseValid && m->audio)
-        clock = m->audioBase + m->audio->processedUSecs() / 1000000.0;
-    else if (m->wallRunning)
-        clock += std::chrono::duration<double>(std::chrono::steady_clock::now() - m->wallStart).count();
+    double wall = m->wallOrigin + m->wallAccum;
+    if (m->wallRunning)
+        wall += std::chrono::duration<double>(now - m->wallStart).count();
 
     const double played = (m->audio && m->audioBaseValid) ? m->audio->processedUSecs() / 1000000.0 : 0.0;
+    const bool audioClock = m->audioReady && m->audioBaseValid && m->audio != nullptr;
+    double clock = wall;
+    bool audioStalled = false;
+    if (audioClock) {
+        const double audioNow = m->audioBase + played;
+        if (m->pause.load()) {
+            clock = audioNow;
+            m->lastAudioPlayed = played;
+            m->lastAudioMove = now;
+            m->audioMoveValid = true;
+        } else {
+            if (!m->audioMoveValid || played > m->lastAudioPlayed + 0.02) {
+                m->lastAudioPlayed = played;
+                m->lastAudioMove = now;
+                m->audioMoveValid = true;
+            }
+            const bool fresh = m->audioMoveValid
+                && std::chrono::duration<double>(now - m->lastAudioMove).count() < 0.15;
+            if (fresh && audioNow + 0.2 >= wall && audioNow < wall + 0.5)
+                clock = audioNow;
+            else {
+                audioStalled = true;
+                clock = wall;
+            }
+        }
+    }
+
     bool got = false;
     bool stalled = false;
     {
@@ -697,15 +866,16 @@ bool Player::takeFrameForClock(VideoFrame& out)
                 }
             }
         }
+        m->videoQueued.store(static_cast<int>(m->video.size()));
     }
-    if (got && stalled) {
+    if (got && stalled && !audioStalled) {
         if (m->audio && m->audioBaseValid)
             m->audioBase = out.pts - played;
-        else {
-            m->wallOrigin = out.pts;
-            m->wallAccum = 0.0;
-            m->wallStart = std::chrono::steady_clock::now();
-        }
+        m->wallOrigin = out.pts;
+        m->wallAccum = 0.0;
+        m->wallStart = now;
+    } else if (audioStalled && m->audio && m->audioBaseValid) {
+        m->audioBase = (got ? out.pts : clock) - played;
     }
     m->videoCv.notify_all();
     m->position = got ? out.pts : clock;
@@ -758,7 +928,12 @@ void Player::decodeLoop(const QString& path)
         ? vulkanDeviceIndex(m->luidHigh.load(), m->luidLow.load())
         : -1;
     const QByteArray pathUtf8 = path.toUtf8();
-    const int mask = probeDecodeMask(pathUtf8.constData(), vulkanIndex, m->luidHigh.load(), m->luidLow.load());
+    ProbeNote probeNote = ProbeNote::None;
+    const int mask = probeDecodeMask(pathUtf8.constData(), vulkanIndex, m->luidHigh.load(), m->luidLow.load(), &probeNote);
+    {
+        std::lock_guard<std::mutex> lock(m->statusMutex);
+        m->probeNote = probeNoteText(probeNote);
+    }
     if (mask == 0) {
         avformat_close_input(&format);
         fail(QString::fromUtf8("\xE8\xA7\x86\xE9\xA2\x91\xE8\xA7\xA3\xE7\xA0\x81\xE5\x99\xA8\xE6\x89\x93\xE5\xBC\x80\xE5\xA4\xB1\xE8\xB4\xA5"));
@@ -814,11 +989,13 @@ void Player::decodeLoop(const QString& path)
     std::unique_ptr<VulkanCopy> zeroCopy;
     auto publish = [&](DecodePath selected) {
         QString gpuName;
+        QString note;
         {
             std::lock_guard<std::mutex> lock(m->statusMutex);
             gpuName = m->gpuName;
+            note = m->probeNote;
         }
-        const QString mode = modeText(selected, gpuName);
+        const QString mode = modeText(selected, gpuName, note);
         m->activePath = static_cast<int>(selected);
         m->setStatus(mode);
         QMetaObject::invokeMethod(this, [this, mode, selected] {
@@ -902,6 +1079,26 @@ void Player::decodeLoop(const QString& path)
                 }
                 if (latest != id)
                     continue;
+                if (m->loop.load() && sec <= 0.001) {
+                    int again = av_seek_frame(format, videoIndex, 0, AVSEEK_FLAG_ANY);
+                    if (again < 0)
+                        again = avformat_seek_file(format, -1, INT64_MIN, 0, 0, AVSEEK_FLAG_BACKWARD);
+                    if (again < 0)
+                        again = av_seek_frame(format, -1, 0, AVSEEK_FLAG_BYTE);
+                    avcodec_flush_buffers(videoCtx);
+                    if (audioCtx)
+                        avcodec_flush_buffers(audioCtx);
+                    m->clearQueues();
+                    m->eof = false;
+                    m->dropUntil = 0.0;
+                    nextVideoPts = 0.0;
+                    nextAudioPts = 0.0;
+                    m->seekPending = false;
+                    m->seekFinished = id;
+                    if (again < 0)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+                    return;
+                }
                 const QString text = QString::fromUtf8("\xE8\xB7\xB3\xE8\xBD\xAC\xE5\xA4\xB1\xE8\xB4\xA5");
                 m->setStatus(text);
                 QMetaObject::invokeMethod(this, [this, text] {

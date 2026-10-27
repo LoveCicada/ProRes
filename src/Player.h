@@ -50,6 +50,9 @@ public:
     qint64 positionMs() const;
     qint64 durationMs() const;
     QString filePath() const;
+    int decodePushed() const;
+    int videoQueued() const;
+    int videoQueueMax() const;
 
 signals:
     void statusChanged(const QString& text);

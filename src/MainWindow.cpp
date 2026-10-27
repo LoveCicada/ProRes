@@ -27,6 +27,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QDir>
+#include <QHash>
 #include <QUrl>
 #include <QVector>
 
@@ -134,6 +135,17 @@ QVector<GpuAdapter> listAdapters()
         adapter->Release();
     }
     factory->Release();
+    QHash<QString, int> copies;
+    for (const GpuAdapter& gpu : adapters)
+        copies[gpu.name] = copies.value(gpu.name) + 1;
+    QHash<QString, int> seen;
+    for (GpuAdapter& gpu : adapters) {
+        if (copies.value(gpu.name) < 2)
+            continue;
+        const int number = seen.value(gpu.name) + 1;
+        seen[gpu.name] = number;
+        gpu.name += QStringLiteral(" #") + QString::number(number);
+    }
     return adapters;
 }
 
@@ -218,8 +230,11 @@ MainWindow::MainWindow(QWidget* parent)
     connect(loopButton, &QPushButton::toggled, this, &MainWindow::toggleLoop);
     buttons->addWidget(loopButton);
 
+    m_stats = new QLabel(root);
+    m_stats->setObjectName(QStringLiteral("status"));
     layout->addWidget(m_title);
     layout->addWidget(m_status);
+    layout->addWidget(m_stats);
     layout->addWidget(m_video, 1);
     layout->addWidget(m_slider);
     layout->addWidget(m_time);
@@ -227,6 +242,11 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(root);
 
     m_player = new Player(this);
+    m_stats->setText(QString::fromUtf8(
+                         "\xE8\xA7\xA3\xE7\xA0\x81 0 fps    "
+                         "\xE9\x98\x9F\xE5\x88\x97 0/%1    "
+                         "\xE6\xB8\xB2\xE6\x9F\x93 0 fps")
+                         .arg(m_player->videoQueueMax()));
     const GpuAdapter startupGpu = savedAdapter();
     m_player->setGpu(startupGpu);
     m_video->setAdapter(startupGpu.luidHigh, startupGpu.luidLow);
@@ -451,8 +471,34 @@ void MainWindow::showSettings()
 void MainWindow::onTick()
 {
     VideoFrame frame;
-    if (m_player->takeFrameForClock(frame))
+    if (m_player->takeFrameForClock(frame)) {
         m_video->present(frame);
+        ++m_renderFrames;
+    }
+    if (!m_statsReady) {
+        m_statsClock.start();
+        m_lastDecodePushed = m_player->decodePushed();
+        m_statsReady = true;
+        return;
+    }
+    const qint64 elapsed = m_statsClock.elapsed();
+    if (elapsed < 500)
+        return;
+    const double seconds = elapsed / 1000.0;
+    const int decoded = m_player->decodePushed();
+    const int decodeFps = seconds > 0.0 ? qRound((decoded - m_lastDecodePushed) / seconds) : 0;
+    const int renderFps = seconds > 0.0 ? qRound(m_renderFrames / seconds) : 0;
+    m_lastDecodePushed = decoded;
+    m_renderFrames = 0;
+    m_statsClock.restart();
+    m_stats->setText(QString::fromUtf8(
+                         "\xE8\xA7\xA3\xE7\xA0\x81 %1 fps    "
+                         "\xE9\x98\x9F\xE5\x88\x97 %2/%3    "
+                         "\xE6\xB8\xB2\xE6\x9F\x93 %4 fps")
+                         .arg(decodeFps)
+                         .arg(m_player->videoQueued())
+                         .arg(m_player->videoQueueMax())
+                         .arg(renderFps));
 }
 
 void MainWindow::play()

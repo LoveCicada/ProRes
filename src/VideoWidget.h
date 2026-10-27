@@ -27,6 +27,8 @@ private:
     void releaseDevice();
     void applyRound();
     void resizeSwapChain();
+    void drawFrame(const VideoFrame& frame, bool blockPresent);
+    bool clientPixels(unsigned& width, unsigned& height) const;
 
     struct Impl;
     std::unique_ptr<Impl> d;

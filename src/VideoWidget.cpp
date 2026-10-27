@@ -6,6 +6,7 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 
+#include <algorithm>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -77,8 +78,13 @@ struct VideoWidget::Impl {
     int hold = 0;
     bool ready = false;
     bool hasLuid = false;
+    bool hasLast = false;
+    bool rebuilding = false;
     qint64 luidHigh = 0;
     quint32 luidLow = 0;
+    UINT bufW = 0;
+    UINT bufH = 0;
+    VideoFrame last;
 };
 
 VideoWidget::VideoWidget(QWidget* parent)
@@ -118,12 +124,33 @@ void VideoWidget::paintEvent(QPaintEvent*)
 {
 }
 
+bool VideoWidget::clientPixels(unsigned& outW, unsigned& outH) const
+{
+    outW = 0;
+    outH = 0;
+    if (!internalWinId())
+        return false;
+    RECT rect = {};
+    if (!GetClientRect(reinterpret_cast<HWND>(winId()), &rect))
+        return false;
+    const LONG w = rect.right - rect.left;
+    const LONG h = rect.bottom - rect.top;
+    if (w < 2 || h < 2)
+        return false;
+    outW = static_cast<unsigned>(w);
+    outH = static_cast<unsigned>(h);
+    return true;
+}
+
 void VideoWidget::applyRound()
 {
-    if (!internalWinId())
+    unsigned cw = 0;
+    unsigned ch = 0;
+    if (!clientPixels(cw, ch))
         return;
-    const int radius = 18;
-    HRGN region = CreateRoundRectRgn(0, 0, width() + 1, height() + 1, radius, radius);
+    const int ratio = std::max(1, static_cast<int>(devicePixelRatioF() + 0.5));
+    const int radius = 18 * ratio;
+    HRGN region = CreateRoundRectRgn(0, 0, static_cast<int>(cw) + 1, static_cast<int>(ch) + 1, radius, radius);
     SetWindowRgn(reinterpret_cast<HWND>(winId()), region, TRUE);
 }
 
@@ -139,6 +166,8 @@ void VideoWidget::releaseDevice()
     d->held[1].reset();
     d->texW = 0;
     d->texH = 0;
+    d->bufW = 0;
+    d->bufH = 0;
     d->swap.Reset();
     d->vs.Reset();
     d->ps.Reset();
@@ -164,13 +193,15 @@ void VideoWidget::setAdapter(qint64 luidHigh, quint32 luidLow)
 
 void VideoWidget::ensureDevice()
 {
-    if (d->ready || width() < 2 || height() < 2)
+    unsigned cw = 0;
+    unsigned ch = 0;
+    if (d->ready || !clientPixels(cw, ch))
         return;
 
     DXGI_SWAP_CHAIN_DESC desc = {};
     desc.BufferCount = 1;
-    desc.BufferDesc.Width = static_cast<UINT>(width());
-    desc.BufferDesc.Height = static_cast<UINT>(height());
+    desc.BufferDesc.Width = cw;
+    desc.BufferDesc.Height = ch;
     desc.BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.OutputWindow = reinterpret_cast<HWND>(winId());
@@ -258,20 +289,65 @@ void VideoWidget::ensureDevice()
 
 void VideoWidget::resizeSwapChain()
 {
-    if (!d->swap || width() < 2 || height() < 2)
+    if (!d->swap || !d->context)
         return;
-    d->target.Reset();
+    unsigned cw = 0;
+    unsigned ch = 0;
+    if (!clientPixels(cw, ch))
+        return;
+    if (d->target && d->bufW == cw && d->bufH == ch)
+        return;
+
+    ID3D11ShaderResourceView* empty = nullptr;
+    d->context->PSSetShaderResources(0, 1, &empty);
     d->context->OMSetRenderTargets(0, nullptr, nullptr);
-    d->swap->ResizeBuffers(0, static_cast<UINT>(width()), static_cast<UINT>(height()),
-                           DXGI_FORMAT_UNKNOWN, 0);
-    ComPtr<ID3D11Texture2D> back;
-    if (FAILED(d->swap->GetBuffer(0, IID_PPV_ARGS(back.GetAddressOf()))))
+    d->context->Flush();
+    d->target.Reset();
+    d->ready = false;
+
+    const HRESULT resized = d->swap->ResizeBuffers(0, cw, ch, DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(resized)) {
+        if (d->rebuilding) {
+            releaseDevice();
+            return;
+        }
+        d->rebuilding = true;
+        VideoFrame saved = d->last;
+        const bool has = d->hasLast;
+        releaseDevice();
+        d->last = std::move(saved);
+        d->hasLast = has;
+        ensureDevice();
+        d->rebuilding = false;
         return;
-    d->device->CreateRenderTargetView(back.Get(), nullptr, d->target.GetAddressOf());
+    }
+
+    ComPtr<ID3D11Texture2D> back;
+    if (FAILED(d->swap->GetBuffer(0, IID_PPV_ARGS(back.GetAddressOf())))
+        || FAILED(d->device->CreateRenderTargetView(back.Get(), nullptr, d->target.GetAddressOf()))) {
+        if (d->rebuilding)
+            return;
+        d->rebuilding = true;
+        VideoFrame saved = d->last;
+        const bool has = d->hasLast;
+        releaseDevice();
+        d->last = std::move(saved);
+        d->hasLast = has;
+        ensureDevice();
+        d->rebuilding = false;
+        return;
+    }
+    d->bufW = cw;
+    d->bufH = ch;
+    d->ready = true;
+    if (d->hasLast)
+        drawFrame(d->last, true);
 }
 
 void VideoWidget::clear()
 {
+    d->hasLast = false;
+    d->last = VideoFrame();
     ensureDevice();
     if (!d->ready)
         return;
@@ -288,15 +364,27 @@ void VideoWidget::releaseShared()
     d->shared.clear();
     d->held[0].reset();
     d->held[1].reset();
+    if (d->last.zeroCopy) {
+        d->hasLast = false;
+        d->last = VideoFrame();
+    }
 }
 
 void VideoWidget::present(const VideoFrame& frame)
 {
-    ensureDevice();
-    if (!d->ready || frame.width < 1 || frame.height < 1)
+    drawFrame(frame, false);
+}
+
+void VideoWidget::drawFrame(const VideoFrame& frame, bool blockPresent)
+{
+    if (!d->swap || !d->target)
+        ensureDevice();
+    if (!d->target || !d->context || !d->device || frame.width < 1 || frame.height < 1)
         return;
     if (!frame.zeroCopy && frame.bgra.empty())
         return;
+    d->last = frame;
+    d->hasLast = true;
 
     ID3D11ShaderResourceView* source = nullptr;
     ComPtr<ID3D11ShaderResourceView> sharedSrv;
@@ -376,8 +464,8 @@ void VideoWidget::present(const VideoFrame& frame)
     }
 
     D3D11_VIEWPORT vp = {};
-    vp.Width = static_cast<float>(width());
-    vp.Height = static_cast<float>(height());
+    vp.Width = static_cast<float>(d->bufW > 0 ? d->bufW : static_cast<UINT>(width()));
+    vp.Height = static_cast<float>(d->bufH > 0 ? d->bufH : static_cast<UINT>(height()));
     vp.MaxDepth = 1.f;
     d->context->RSSetViewports(1, &vp);
     d->context->OMSetRenderTargets(1, d->target.GetAddressOf(), nullptr);
@@ -396,6 +484,9 @@ void VideoWidget::present(const VideoFrame& frame)
     d->context->Draw(4, 0);
     ID3D11ShaderResourceView* empty = nullptr;
     d->context->PSSetShaderResources(0, 1, &empty);
-    d->context->Flush();
-    d->swap->Present(0, DXGI_PRESENT_DO_NOT_WAIT);
+    if (blockPresent)
+        d->context->Flush();
+    const HRESULT presented = d->swap->Present(0, blockPresent ? 0u : DXGI_PRESENT_DO_NOT_WAIT);
+    if (blockPresent && presented == DXGI_ERROR_WAS_STILL_DRAWING)
+        d->swap->Present(0, 0);
 }
