@@ -53,11 +53,13 @@ public:
     int decodePushed() const;
     int videoQueued() const;
     int videoQueueMax() const;
+    QString videoPixelFormat() const;
 
 signals:
     void statusChanged(const QString& text);
     void timingChanged(qint64 positionMs, qint64 durationMs);
     void decodeOptionsChanged(int mask, int path);
+    void pixelFormatChanged(const QString& name);
 
 private:
     void decodeLoop(const QString& path);

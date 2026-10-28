@@ -34,6 +34,7 @@ private:
     void seekBack();
     void seekForward();
     void toggleLoop(bool on);
+    void refreshStatsLine(int decodeFps, int renderFps);
 
     Player* m_player = nullptr;
     VideoWidget* m_video = nullptr;
@@ -51,4 +52,5 @@ private:
     int m_renderFrames = 0;
     int m_lastDecodePushed = 0;
     bool m_statsReady = false;
+    QString m_pixelFormat;
 };

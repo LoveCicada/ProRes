@@ -254,6 +254,23 @@ QString modeText(DecodePath path, const QString& gpu, const QString& note)
     return text;
 }
 
+QString pixFmtName(AVPixelFormat fmt)
+{
+    if (fmt == AV_PIX_FMT_NONE || fmt == AV_PIX_FMT_VULKAN)
+        return {};
+    const char* name = av_get_pix_fmt_name(fmt);
+    return name ? QString::fromUtf8(name) : QString();
+}
+
+AVPixelFormat contentPixelFormat(AVFrame* src, AVPixelFormat softwareFmt)
+{
+    if (src && src->format == AV_PIX_FMT_VULKAN && src->hw_frames_ctx && src->hw_frames_ctx->data) {
+        auto* frames = reinterpret_cast<AVHWFramesContext*>(src->hw_frames_ctx->data);
+        return static_cast<AVPixelFormat>(frames->sw_format);
+    }
+    return softwareFmt;
+}
+
 QString probeNoteText(ProbeNote note)
 {
     if (note == ProbeNote::NoVulkanDevice) {
@@ -407,6 +424,7 @@ struct Player::Engine {
     std::mutex statusMutex;
     QString status;
     QString shownStatus;
+    QString pixelFormat;
 
     QAudioOutput* audio = nullptr;
     QIODevice* audioDevice = nullptr;
@@ -507,6 +525,12 @@ int Player::videoQueued() const
 int Player::videoQueueMax() const
 {
     return kMaxFrames;
+}
+
+QString Player::videoPixelFormat() const
+{
+    std::lock_guard<std::mutex> lock(m->statusMutex);
+    return m->pixelFormat;
 }
 
 qint64 Player::positionMs() const
@@ -610,6 +634,11 @@ void Player::stop()
     m->position = 0.0;
     m->eof = false;
     m->wallRunning = false;
+    {
+        std::lock_guard<std::mutex> lock(m->statusMutex);
+        m->pixelFormat.clear();
+    }
+    emit pixelFormatChanged(QString());
     if (!m->path.isEmpty()) {
         m->setStatus(QString::fromUtf8("\xE5\xB7\xB2\xE5\x81\x9C\xE6\xAD\xA2"));
         m->shownStatus = QString::fromUtf8("\xE5\xB7\xB2\xE5\x81\x9C\xE6\xAD\xA2");
@@ -897,11 +926,37 @@ void Player::decodeLoop(const QString& path)
 {
     auto fail = [&](const QString& text) {
         m->setStatus(text);
+        {
+            std::lock_guard<std::mutex> lock(m->statusMutex);
+            m->pixelFormat.clear();
+        }
         QMetaObject::invokeMethod(this, [this, text] {
             m->shownStatus = text;
             emit statusChanged(text);
+            emit pixelFormatChanged(QString());
         }, Qt::QueuedConnection);
         m->running = false;
+    };
+
+    auto publishPixelFormat = [&](AVPixelFormat fmt, bool onlyIfEmpty) {
+        const QString name = pixFmtName(fmt);
+        if (name.isEmpty())
+            return;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(m->statusMutex);
+            if (onlyIfEmpty && !m->pixelFormat.isEmpty())
+                return;
+            if (m->pixelFormat == name)
+                return;
+            m->pixelFormat = name;
+            changed = true;
+        }
+        if (!changed)
+            return;
+        QMetaObject::invokeMethod(this, [this, name] {
+            emit pixelFormatChanged(name);
+        }, Qt::QueuedConnection);
     };
 
     AVFormatContext* format = nullptr;
@@ -922,6 +977,8 @@ void Player::decodeLoop(const QString& path)
         fail(QString::fromUtf8("\xE6\xB2\xA1\xE6\x9C\x89\xE8\xA7\x86\xE9\xA2\x91\xE6\xB5\x81"));
         return;
     }
+
+    publishPixelFormat(static_cast<AVPixelFormat>(format->streams[videoIndex]->codecpar->format), false);
 
     const AVCodecID videoCodec = format->streams[videoIndex]->codecpar->codec_id;
     const int vulkanIndex = proresFamily(videoCodec)
@@ -1141,6 +1198,7 @@ void Player::decodeLoop(const QString& path)
         const auto stopCopy = [&] {
             return m->stop.load() || m->seekPending.load() || m->pause.load();
         };
+        publishPixelFormat(contentPixelFormat(src, static_cast<AVPixelFormat>(src->format)), true);
         if (chosen == DecodePath::VulkanZeroCopy && zeroCopy && src->format == AV_PIX_FMT_VULKAN) {
             const VulkanCopyResult copied = zeroCopy->copy(src, stopCopy);
             if (copied.interrupted)

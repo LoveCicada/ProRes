@@ -242,15 +242,16 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(root);
 
     m_player = new Player(this);
-    m_stats->setText(QString::fromUtf8(
-                         "\xE8\xA7\xA3\xE7\xA0\x81 0 fps    "
-                         "\xE9\x98\x9F\xE5\x88\x97 0/%1    "
-                         "\xE6\xB8\xB2\xE6\x9F\x93 0 fps")
-                         .arg(m_player->videoQueueMax()));
+    refreshStatsLine(0, 0);
     const GpuAdapter startupGpu = savedAdapter();
     m_player->setGpu(startupGpu);
     m_video->setAdapter(startupGpu.luidHigh, startupGpu.luidLow);
     connect(m_player, &Player::statusChanged, m_status, &QLabel::setText);
+    connect(m_player, &Player::pixelFormatChanged, this, [this](const QString& name) {
+        m_pixelFormat = name;
+        refreshStatsLine(0, 0);
+        m_statsReady = false;
+    });
     connect(m_player, &Player::decodeOptionsChanged, this, [this](int mask, int path) {
         m_updatingDecode = true;
         m_decode->clear();
@@ -342,6 +343,9 @@ void MainWindow::closeEvent(QCloseEvent* event)
 void MainWindow::openPath(const QString& path)
 {
     m_video->releaseShared();
+    m_pixelFormat.clear();
+    refreshStatsLine(0, 0);
+    m_statsReady = false;
     m_title->setText(QFileInfo(path).fileName());
     m_player->open(path);
 }
@@ -468,6 +472,22 @@ void MainWindow::showSettings()
         openPath(m_player->filePath());
 }
 
+void MainWindow::refreshStatsLine(int decodeFps, int renderFps)
+{
+    const QString prefix = m_pixelFormat.isEmpty()
+        ? QString()
+        : m_pixelFormat + QStringLiteral("    ");
+    m_stats->setText(prefix
+                     + QString::fromUtf8(
+                         "\xE8\xA7\xA3\xE7\xA0\x81 %1 fps    "
+                         "\xE9\x98\x9F\xE5\x88\x97 %2/%3    "
+                         "\xE6\xB8\xB2\xE6\x9F\x93 %4 fps")
+                           .arg(decodeFps)
+                           .arg(m_player ? m_player->videoQueued() : 0)
+                           .arg(m_player ? m_player->videoQueueMax() : 8)
+                           .arg(renderFps));
+}
+
 void MainWindow::onTick()
 {
     VideoFrame frame;
@@ -491,14 +511,7 @@ void MainWindow::onTick()
     m_lastDecodePushed = decoded;
     m_renderFrames = 0;
     m_statsClock.restart();
-    m_stats->setText(QString::fromUtf8(
-                         "\xE8\xA7\xA3\xE7\xA0\x81 %1 fps    "
-                         "\xE9\x98\x9F\xE5\x88\x97 %2/%3    "
-                         "\xE6\xB8\xB2\xE6\x9F\x93 %4 fps")
-                         .arg(decodeFps)
-                         .arg(m_player->videoQueued())
-                         .arg(m_player->videoQueueMax())
-                         .arg(renderFps));
+    refreshStatsLine(decodeFps, renderFps);
 }
 
 void MainWindow::play()
