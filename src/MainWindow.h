@@ -53,4 +53,5 @@ private:
     int m_lastDecodePushed = 0;
     bool m_statsReady = false;
     QString m_pixelFormat;
+    QString m_videoCodec;
 };

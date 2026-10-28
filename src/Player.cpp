@@ -262,6 +262,18 @@ QString pixFmtName(AVPixelFormat fmt)
     return name ? QString::fromUtf8(name) : QString();
 }
 
+QString codecIdLabel(AVCodecID id)
+{
+    if (id == AV_CODEC_ID_PRORES) {
+        return QString::fromUtf8(
+            "\xE6\xA0\x87\xE5\x87\x86\x20\x50\x72\x6F\x52\x65\x73");
+    }
+    if (id == AV_CODEC_ID_PRORES_RAW)
+        return QString::fromUtf8("ProRes RAW");
+    const char* name = avcodec_get_name(id);
+    return name ? QString::fromUtf8(name) : QString();
+}
+
 AVPixelFormat contentPixelFormat(AVFrame* src, AVPixelFormat softwareFmt)
 {
     if (src && src->format == AV_PIX_FMT_VULKAN && src->hw_frames_ctx && src->hw_frames_ctx->data) {
@@ -425,6 +437,7 @@ struct Player::Engine {
     QString status;
     QString shownStatus;
     QString pixelFormat;
+    QString videoCodec;
 
     QAudioOutput* audio = nullptr;
     QIODevice* audioDevice = nullptr;
@@ -533,6 +546,12 @@ QString Player::videoPixelFormat() const
     return m->pixelFormat;
 }
 
+QString Player::videoCodecName() const
+{
+    std::lock_guard<std::mutex> lock(m->statusMutex);
+    return m->videoCodec;
+}
+
 qint64 Player::positionMs() const
 {
     return static_cast<qint64>(m->position.load() * 1000.0);
@@ -637,8 +656,10 @@ void Player::stop()
     {
         std::lock_guard<std::mutex> lock(m->statusMutex);
         m->pixelFormat.clear();
+        m->videoCodec.clear();
     }
     emit pixelFormatChanged(QString());
+    emit videoCodecChanged(QString());
     if (!m->path.isEmpty()) {
         m->setStatus(QString::fromUtf8("\xE5\xB7\xB2\xE5\x81\x9C\xE6\xAD\xA2"));
         m->shownStatus = QString::fromUtf8("\xE5\xB7\xB2\xE5\x81\x9C\xE6\xAD\xA2");
@@ -929,11 +950,13 @@ void Player::decodeLoop(const QString& path)
         {
             std::lock_guard<std::mutex> lock(m->statusMutex);
             m->pixelFormat.clear();
+            m->videoCodec.clear();
         }
         QMetaObject::invokeMethod(this, [this, text] {
             m->shownStatus = text;
             emit statusChanged(text);
             emit pixelFormatChanged(QString());
+            emit videoCodecChanged(QString());
         }, Qt::QueuedConnection);
         m->running = false;
     };
@@ -959,6 +982,25 @@ void Player::decodeLoop(const QString& path)
         }, Qt::QueuedConnection);
     };
 
+    auto publishVideoCodec = [&](AVCodecID id) {
+        const QString label = codecIdLabel(id);
+        if (label.isEmpty())
+            return;
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> lock(m->statusMutex);
+            if (m->videoCodec == label)
+                return;
+            m->videoCodec = label;
+            changed = true;
+        }
+        if (!changed)
+            return;
+        QMetaObject::invokeMethod(this, [this, label] {
+            emit videoCodecChanged(label);
+        }, Qt::QueuedConnection);
+    };
+
     AVFormatContext* format = nullptr;
     if (avformat_open_input(&format, path.toUtf8().constData(), nullptr, nullptr) < 0) {
         fail(QString::fromUtf8("\xE6\x97\xA0\xE6\xB3\x95\xE6\x89\x93\xE5\xBC\x80\xE6\x96\x87\xE4\xBB\xB6"));
@@ -978,9 +1020,11 @@ void Player::decodeLoop(const QString& path)
         return;
     }
 
+    const AVCodecID videoCodecId = format->streams[videoIndex]->codecpar->codec_id;
+    publishVideoCodec(videoCodecId);
     publishPixelFormat(static_cast<AVPixelFormat>(format->streams[videoIndex]->codecpar->format), false);
 
-    const AVCodecID videoCodec = format->streams[videoIndex]->codecpar->codec_id;
+    const AVCodecID videoCodec = videoCodecId;
     const int vulkanIndex = proresFamily(videoCodec)
         ? vulkanDeviceIndex(m->luidHigh.load(), m->luidLow.load())
         : -1;

@@ -252,6 +252,11 @@ MainWindow::MainWindow(QWidget* parent)
         refreshStatsLine(0, 0);
         m_statsReady = false;
     });
+    connect(m_player, &Player::videoCodecChanged, this, [this](const QString& label) {
+        m_videoCodec = label;
+        refreshStatsLine(0, 0);
+        m_statsReady = false;
+    });
     connect(m_player, &Player::decodeOptionsChanged, this, [this](int mask, int path) {
         m_updatingDecode = true;
         m_decode->clear();
@@ -344,6 +349,7 @@ void MainWindow::openPath(const QString& path)
 {
     m_video->releaseShared();
     m_pixelFormat.clear();
+    m_videoCodec.clear();
     refreshStatsLine(0, 0);
     m_statsReady = false;
     m_title->setText(QFileInfo(path).fileName());
@@ -474,9 +480,16 @@ void MainWindow::showSettings()
 
 void MainWindow::refreshStatsLine(int decodeFps, int renderFps)
 {
-    const QString prefix = m_pixelFormat.isEmpty()
-        ? QString()
-        : m_pixelFormat + QStringLiteral("    ");
+    QString prefix;
+    if (!m_videoCodec.isEmpty())
+        prefix = m_videoCodec;
+    if (!m_pixelFormat.isEmpty()) {
+        if (!prefix.isEmpty())
+            prefix += QString::fromUtf8(" \xC2\xB7 ");
+        prefix += m_pixelFormat;
+    }
+    if (!prefix.isEmpty())
+        prefix += QStringLiteral("    ");
     m_stats->setText(prefix
                      + QString::fromUtf8(
                          "\xE8\xA7\xA3\xE7\xA0\x81 %1 fps    "

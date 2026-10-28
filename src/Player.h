@@ -54,12 +54,14 @@ public:
     int videoQueued() const;
     int videoQueueMax() const;
     QString videoPixelFormat() const;
+    QString videoCodecName() const;
 
 signals:
     void statusChanged(const QString& text);
     void timingChanged(qint64 positionMs, qint64 durationMs);
     void decodeOptionsChanged(int mask, int path);
     void pixelFormatChanged(const QString& name);
+    void videoCodecChanged(const QString& label);
 
 private:
     void decodeLoop(const QString& path);
